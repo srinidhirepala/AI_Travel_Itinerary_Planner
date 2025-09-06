@@ -1,0 +1,7 @@
+I want an AI agent which is used for travel planner:
+The functionalities that are needed to be provided by the Agent are:
+-> it should take the destination and dates as an input and then need to give 
+    the itinerary plan which includes wta all the places they can visit,the timings 
+    for the visiting
+    the hotels they can stay
+We can also suggest the possible ways of travel options like bus,train and flight routes (timings and costs of average if possible)
