@@ -1,117 +1,175 @@
 """
-Google OAuth via streamlit-google-auth.
-Wraps the library so the rest of the app just calls auth.get_user().
+Google OAuth — no third-party auth library.
+Uses plain requests + Google's OAuth2 endpoints directly.
+
+Flow:
+  1. User clicks "Sign in with Google"
+  2. We redirect to Google's auth URL
+  3. Google redirects back to localhost:8501?code=XXX&state=YYY
+  4. We exchange the code for tokens, fetch user info, done.
 """
-import streamlit as st
-from streamlit_google_auth import Authenticate
+
 import os
+import json
+import secrets
+import requests
+import streamlit as st
+from urllib.parse import urlencode
 from dotenv import load_dotenv
-from utils.db import upsert_user, get_user, init_db
+from utils.db import upsert_user, init_db
 
 load_dotenv()
 
+# ── Google OAuth endpoints ────────────────────────────────────────────────────
+GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO  = "https://www.googleapis.com/oauth2/v3/userinfo"
 
-def _get_authenticator() -> Authenticate:
-    """
-    Initialize OAuth authenticator with proper configuration
-    """
-    if "oauth_authenticator" not in st.session_state:
-        st.session_state.oauth_authenticator = Authenticate(
-            secret_credentials_path=os.getenv("GOOGLE_CREDENTIALS_PATH", "google_credentials.json"),
-            cookie_name="travel_planner_session",
-            cookie_key=os.getenv("COOKIE_SECRET", "change_this_secret_key_in_production"),
-            redirect_uri=os.getenv("REDIRECT_URI", "http://localhost:8501"),
+
+def _load_credentials():
+    path = os.getenv("GOOGLE_CREDENTIALS_PATH", "google_credentials.json")
+    try:
+        with open(path) as f:
+            creds = json.load(f)
+        web = creds.get("web", creds)
+        return web["client_id"], web["client_secret"]
+    except Exception as e:
+        st.error(f"Could not load {path}: {e}")
+        return None, None
+
+
+def _redirect_uri():
+    return os.getenv("REDIRECT_URI", "http://localhost:8501")
+
+
+def _build_auth_url(state: str) -> str:
+    client_id, _ = _load_credentials()
+    params = {
+        "client_id":     client_id,
+        "redirect_uri":  _redirect_uri(),
+        "response_type": "code",
+        "scope":         "openid email profile",
+        "state":         state,
+        "access_type":   "online",
+        "prompt":        "select_account",
+    }
+    return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+
+
+def _exchange_code(code: str) -> dict | None:
+    client_id, client_secret = _load_credentials()
+    try:
+        resp = requests.post(GOOGLE_TOKEN_URL, data={
+            "code":          code,
+            "client_id":     client_id,
+            "client_secret": client_secret,
+            "redirect_uri":  _redirect_uri(),
+            "grant_type":    "authorization_code",
+        }, timeout=10)
+        resp.raise_for_status()
+        access_token = resp.json().get("access_token")
+
+        uinfo = requests.get(
+            GOOGLE_USERINFO,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
         )
-    return st.session_state.oauth_authenticator
+        uinfo.raise_for_status()
+        return uinfo.json()
+    except requests.RequestException as e:
+        st.error(f"OAuth token exchange failed: {e}")
+        return None
 
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def render_login() -> bool:
     """
-    Renders login UI if not authenticated.
-    Returns True if the user is logged in, False otherwise.
-    Stores user info in st.session_state.user on success.
+    Call at the top of every page.
+    Returns True if authenticated, False otherwise.
     """
-    # Force Demo Mode to unblock user
-    os.environ["DEMO_MODE"] = "true"
-    
     init_db()
 
-    # Check if already logged in
-    if "user" in st.session_state and st.session_state.user:
+    # 1. Already logged in
+    if st.session_state.get("user"):
         return True
 
-    # Demo mode check
+    # 2. Demo mode
     if os.getenv("DEMO_MODE") == "true" or st.session_state.get("demo_mode"):
         st.session_state.user = {
-            "id": "demo_user_" + str(hash("demo")%10000),
-            "email": "demo@wandrtravel.app",
-            "name": "🌍 Demo Traveller",
-            "picture": ""
+            "id":      "demo_user_" + str(hash("demo") % 10000),
+            "email":   "demo@wandrtravel.app",
+            "name":    "🌍 Demo Traveller",
+            "picture": "",
         }
         return True
 
-    # Initialize authenticator
-    authenticator = _get_authenticator()
+    params = st.query_params.to_dict()
 
-    # Try normal OAuth login with error handling
-    try:
-        authenticator.check_authentification()
+    # 3. Google redirected back with ?code=...
+    if "code" in params:
+        code  = params["code"]
+        state = params.get("state", "")
 
-        if st.session_state.get("connected"):
-            user_info = st.session_state.get("user_info", {})
-            sub     = user_info.get("sub", user_info.get("id", ""))
+        # Validate state (CSRF protection)
+        expected = st.session_state.get("oauth_state")
+        if expected and state != expected:
+            st.error("Security check failed. Please try signing in again.")
+            st.query_params.clear()
+            st.session_state.pop("oauth_state", None)
+            st.rerun()
+
+        with st.spinner("Signing you in..."):
+            user_info = _exchange_code(code)
+
+        st.query_params.clear()
+        st.session_state.pop("oauth_state", None)
+
+        if user_info:
+            sub     = user_info.get("sub", "")
             email   = user_info.get("email", "")
             name    = user_info.get("name", "")
             picture = user_info.get("picture", "")
 
-            if not sub or not email:
-                st.error("❌ Could not retrieve user information")
-                return False
-
             upsert_user(sub, email, name, picture)
-            st.session_state.user = {"id": sub, "email": email, "name": name, "picture": picture}
-            return True
-    except Exception as e:
-        # Instead of swallowing the error and looping, display it explicitly
-        st.error("⚠️ **Google Authentication Callback Failed**")
-        error_msg = str(e).lower()
-        
-        if "code_verifier" in error_msg or "code verifier" in error_msg or "cookie" in error_msg:
-            st.info(
-                "**Localhost Cookie Issue Detected:**\\n"
-                "Google OAuth requires secure cookies which often fail on `localhost`.\\n"
-                "**Quick Fix:** Click the Demo Mode button below to explore the app without logging in."
-            )
+            st.session_state.user = {
+                "id":      sub,
+                "email":   email,
+                "name":    name,
+                "picture": picture,
+            }
+            st.rerun()
         else:
-            st.error(f"Error Details: {e}")
-            
-        if st.button("🚀 Launch Demo Mode", use_container_width=True):
-            os.environ["DEMO_MODE"] = "true"
-            st.rerun()
-            
-        if st.button("🔄 Try Again"):
-            # Clear stuck query params before rerunning
-            st.query_params.clear()
-            st.rerun()
-            
-        st.stop()  # Prevent falling through to the landing page and looping
+            st.error("Could not retrieve your Google account info. Please try again.")
 
-    # Not logged in — show landing page only
-    _render_landing(authenticator)
+        return False
+
+    # 4. Google returned an error (e.g. user cancelled)
+    if "error" in params:
+        st.warning(f"Google login was cancelled or failed: {params['error']}")
+        st.query_params.clear()
+
+    # 5. Not logged in — show landing page
+    _render_landing()
     return False
 
 
 def logout():
-    authenticator = _get_authenticator()
-    authenticator.logout()
-    st.session_state.user = None
-    st.session_state.pop("connected", None)
-    st.session_state.pop("user_info", None)
+    st.session_state.pop("user", None)
+    st.session_state.pop("oauth_state", None)
+    st.session_state.pop("demo_mode", None)
+    st.query_params.clear()
     st.rerun()
 
 
-def _render_landing(authenticator):
-    """Full-page landing screen shown to logged-out visitors."""
+# ── Landing page ──────────────────────────────────────────────────────────────
+
+def _render_landing():
+    if "oauth_state" not in st.session_state:
+        st.session_state.oauth_state = secrets.token_urlsafe(16)
+
+    auth_url = _build_auth_url(st.session_state.oauth_state)
+
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&family=DM+Sans:wght@300;400;500;600;700&display=swap');
@@ -120,139 +178,69 @@ def _render_landing(authenticator):
         background: linear-gradient(135deg, #0a0e27 0%, #0f1437 50%, #151b3a 100%) !important;
         min-height: 100vh;
     }
-    [data-testid="stHeader"] { display: none; }
+    [data-testid="stHeader"]  { display: none; }
     [data-testid="stSidebar"] { display: none; }
 
     .land-hero {
-        min-height: 100vh;
+        min-height: 80vh;
         display: flex;
         flex-direction: column;
         align-items: center;
         justify-content: center;
         text-align: center;
-        padding: 4rem 2rem;
-        background: 
-            radial-gradient(ellipse 100% 80% at 50% -20%, rgba(99,102,241,0.15) 0%, transparent 50%),
-            radial-gradient(ellipse 100% 100% at 80% 100%, rgba(236,72,153,0.1) 0%, transparent 50%),
-            radial-gradient(ellipse 100% 100% at 20% 80%, rgba(6,182,212,0.1) 0%, transparent 50%);
+        padding: 4rem 2rem 2rem;
     }
-    
     .land-tag {
         font-family: 'DM Sans', sans-serif;
-        font-size: 0.8rem;
-        font-weight: 700;
-        letter-spacing: 0.35em;
-        text-transform: uppercase;
+        font-size: 0.8rem; font-weight: 700;
+        letter-spacing: 0.35em; text-transform: uppercase;
         background: linear-gradient(135deg, #6366f1, #06b6d4);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin-bottom: 1.5rem;
-        animation: fadeInDown 0.8s ease-out;
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        background-clip: text; margin-bottom: 1.5rem;
     }
-    
     .land-h1 {
         font-family: 'Playfair Display', serif;
         font-size: clamp(3rem, 10vw, 6.5rem);
-        font-weight: 700;
-        color: #f8f9fa;
-        line-height: 1.05;
-        margin: 0 0 0.4rem;
-        animation: fadeInUp 0.8s ease-out 0.1s both;
-        letter-spacing: -1px;
+        font-weight: 700; color: #f8f9fa;
+        line-height: 1.05; margin: 0 0 0.4rem; letter-spacing: -1px;
     }
-    
     .land-h1 em {
         font-style: italic;
         background: linear-gradient(135deg, #6366f1, #ec4899);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
         background-clip: text;
     }
-    
     .land-sub {
         font-family: 'DM Sans', sans-serif;
-        font-size: 1.2rem;
-        color: #8892b0;
-        font-weight: 400;
-        margin: 1.5rem 0 3rem;
-        max-width: 520px;
-        line-height: 1.7;
-        animation: fadeInUp 0.8s ease-out 0.2s both;
+        font-size: 1.2rem; color: #8892b0;
+        margin: 1.5rem 0 2rem; max-width: 520px; line-height: 1.7;
     }
-    
+    .land-divider {
+        width: 80px; height: 3px;
+        background: linear-gradient(90deg, #6366f1, #06b6d4, #ec4899);
+        margin: 0 auto 1.5rem; border-radius: 2px;
+    }
     .land-features {
-        display: flex;
-        gap: 2.5rem;
-        margin: 4rem 0;
-        flex-wrap: wrap;
-        justify-content: center;
-        animation: fadeInUp 0.8s ease-out 0.3s both;
+        display: flex; gap: 2.5rem; margin: 2rem 0;
+        flex-wrap: wrap; justify-content: center;
     }
-    
     .land-feat {
         background: linear-gradient(135deg, rgba(21,27,58,0.5), rgba(26,34,80,0.3));
         border: 1px solid rgba(99,102,241,0.2);
-        border-radius: 20px;
-        padding: 2rem 2.2rem;
-        width: 200px;
-        text-align: center;
-        transition: all 0.3s ease;
-        backdrop-filter: blur(10px);
-        box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        border-radius: 20px; padding: 2rem 2.2rem; width: 200px; text-align: center;
     }
-    
-    .land-feat:hover {
-        border-color: rgba(99,102,241,0.6);
-        transform: translateY(-4px);
-        box-shadow: 0 20px 60px rgba(99,102,241,0.2);
+    .land-feat .icon  { font-size: 2.5rem; margin-bottom: 0.8rem; display: inline-block; }
+    .land-feat .label { font-family: 'DM Sans', sans-serif; font-size: 0.9rem; color: #d0d4e0; line-height: 1.5; font-weight: 500; }
+    .google-btn {
+        display: inline-flex; align-items: center; gap: 12px;
+        background: #fff; color: #3c4043;
+        border: 1px solid #dadce0; border-radius: 4px;
+        padding: 10px 24px; font-family: 'DM Sans', sans-serif;
+        font-size: 1rem; font-weight: 500;
+        text-decoration: none; cursor: pointer;
+        transition: box-shadow 0.2s; margin-bottom: 12px;
     }
-    
-    .land-feat .icon {
-        font-size: 2.5rem;
-        margin-bottom: 0.8rem;
-        display: inline-block;
-    }
-    
-    .land-feat .label {
-        font-family: 'DM Sans', sans-serif;
-        font-size: 0.9rem;
-        color: #d0d4e0;
-        line-height: 1.5;
-        font-weight: 500;
-    }
-    
-    .land-divider {
-        width: 80px;
-        height: 3px;
-        background: linear-gradient(90deg, #6366f1, #06b6d4, #ec4899);
-        margin: 0 auto 1.5rem;
-        border-radius: 2px;
-        animation: fadeInDown 0.8s ease-out 0.15s both;
-    }
-    
-    @keyframes fadeInDown {
-        from {
-            opacity: 0;
-            transform: translateY(-20px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0);
-        }
-    }
-    
-    @keyframes fadeInUp {
-        from {
-            opacity: 0;
-            transform: translateY(20px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0);
-        }
-    }
-    
+    .google-btn:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
     </style>
 
     <div class="land-hero">
@@ -271,33 +259,23 @@ def _render_landing(authenticator):
 
     col1, col2, col3 = st.columns([1, 1.2, 1])
     with col2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        try:
-            authenticator.login()
-        except Exception as e:
-            error_msg = str(e).lower()
-            
-            if "code_verifier" in error_msg or "missing code verifier" in error_msg:
-                st.error("⚠️ **OAuth PKCE Error**")
-                st.info(
-                    "**To fix Google login:**\n\n"
-                    "1. Clear browser cookies for localhost:8501\n"
-                    "2. Open DevTools (F12) → Application → Cookies → Delete localhost cookies\n"
-                    "3. Refresh the page\n\n"
-                    "📖 See `OAUTH_SETUP.md` for detailed troubleshooting"
-                )
-            elif "redirect" in error_msg:
-                st.error("⚠️ **Redirect URI Mismatch**")
-                st.info(
-                    "Make sure Google Cloud Console has this redirect URI:\n"
-                    "`http://localhost:8501`"
-                )
-            else:
-                st.warning(f"⚠️ Login error: {error_msg[:80]}")
-                st.info("Try refreshing the page or clearing your browser cache")
-            
-            st.divider()
-            st.info("💡 Use **Demo Mode** to explore all features without authentication:")
-            if st.button("🚀 Launch Demo Mode", use_container_width=True, key="demo_btn"):
-                os.environ["DEMO_MODE"] = "true"
-                st.rerun()
+        st.markdown(f"""
+        <div style="text-align:center; margin-bottom: 16px;">
+            <a href="{auth_url}" class="google-btn" target="_self">
+                <svg width="20" height="20" viewBox="0 0 48 48">
+                    <path fill="#EA4335" d="M24 9.5c3.1 0 5.8 1.1 8 2.9l6-6C34.4 3 29.5 1 24 1 14.7 1 6.8 6.7 3.4 14.9l7 5.4C12.1 13.6 17.6 9.5 24 9.5z"/>
+                    <path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v8.5h12.7c-.6 3-2.3 5.5-4.8 7.2l7.4 5.7c4.3-4 6.8-9.9 7.2-16.9z"/>
+                    <path fill="#FBBC05" d="M10.4 28.6A14.9 14.9 0 0 1 9.5 24c0-1.6.3-3.1.8-4.6l-7-5.4A23.9 23.9 0 0 0 .5 24c0 3.9.9 7.5 2.8 10.7l7.1-6.1z"/>
+                    <path fill="#34A853" d="M24 47c5.4 0 9.9-1.8 13.2-4.8l-7.4-5.7c-1.8 1.2-4.1 1.9-5.8 1.9-6.4 0-11.8-4.3-13.6-10.1l-7.1 6.1C6.8 41.3 14.7 47 24 47z"/>
+                </svg>
+                Sign in with Google
+            </a>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<div style='text-align:center; color:#666; margin: 8px 0;'>or</div>",
+                    unsafe_allow_html=True)
+
+        if st.button("🚀 Continue with Demo Mode", use_container_width=True):
+            st.session_state.demo_mode = True
+            st.rerun()
