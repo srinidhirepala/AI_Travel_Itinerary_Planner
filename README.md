@@ -78,17 +78,16 @@ Opens at http://localhost:8501 with automatic login as demo user.
 IOMP/
 ├── app.py                      # Main app — all 4 pages
 ├── requirements.txt
-├── .env                        # Your secrets (never commit)
-├── .env.example
-├── google_credentials.json     # OAuth credentials (never commit)
+├── .env                       
+├── google_credentials.json     
 │
 ├── utils/
 │   ├── auth.py                 # Google OAuth + landing page
 │   ├── db.py                   # SQLite — users, profiles, liked places, itineraries
-│   ├── llm_handler.py          # Groq API calls, structured JSON output
+│   ├── llm_handler.py          # API calls, structured JSON output
 │   ├── prompt_builder.py       # Prompt + schema construction
 │   ├── recommendations.py      # Scoring engine
-│   └── styles.py               # Global CSS (dark editorial theme)
+│   └── styles.py               
 │
 └── data/
     └── travel.db               # Auto-created on first run
