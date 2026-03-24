@@ -1,6 +1,7 @@
 """
 Wandr — AI Travel Itinerary Planner
 """
+import os
 import streamlit as st
 from utils.styles import GLOBAL_CSS
 from utils.Auth import render_login, logout
@@ -14,6 +15,8 @@ from utils.route_intelligence import analyze_route
 from utils.validation import validate_trip_params, ValidationError
 from utils.error_handler import ErrorHandler
 from utils.rate_limiter import itinerary_limiter
+
+port = int(os.environ.get("PORT", 8501))
 
 st.set_page_config(
     page_title="Wandr — AI Travel Planner",
