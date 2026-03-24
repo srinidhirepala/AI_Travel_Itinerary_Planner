@@ -208,5 +208,6 @@ __marimo__/
 
 unused
 data
+chat_logs
 
 google_credentials.json
