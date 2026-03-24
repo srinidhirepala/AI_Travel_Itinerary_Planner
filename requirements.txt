@@ -1,8 +1,9 @@
-streamlit==1.31.0
 python-dotenv==1.0.0
-streamlit-google-auth==1.1.4
 requests==2.31.0
 groq>=0.4.1
 pydantic>=2.0.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.0.0
+reportlab>=4.0.0
+flask>=2.3.0
+pydeck>=0.8.0
