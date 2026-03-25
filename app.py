@@ -14,6 +14,7 @@ from utils.prompt_builder import build_itinerary_prompt, build_recommendations_p
 from utils.recommendations import get_recommendations
 from utils.route_intelligence import analyze_route
 from utils.weekend_getaways import get_weekend_getaways
+from utils.stay_recommendations import get_stay_recommendations
 from utils.validation import validate_trip_params, ValidationError
 from utils.error_handler import ErrorHandler
 from utils.rate_limiter import itinerary_limiter
@@ -249,6 +250,8 @@ hometown = ""
 weekend_options = []
 selected_weekend_getaway = None
 generate_btn = False
+optimizer_weights = None
+enable_what_if = False
 
 if page is None:
     st.markdown("""
@@ -368,6 +371,34 @@ if page in ("planner", "weekend"):
             default=[i for i in saved_interests if i in ALL_INTERESTS] or ["Culture", "Food"],
             key="interests_sel",
         )
+
+    if not is_weekend:
+        with st.expander("Multi-route optimizer", expanded=False):
+            st.caption("Set priorities to rank route options by time, fatigue, transport cost proxy, and interest fit.")
+            w_cols = st.columns(4, gap="small")
+            with w_cols[0]:
+                w_time = st.slider("Time", min_value=0, max_value=100, value=35, key="opt_w_time")
+            with w_cols[1]:
+                w_fatigue = st.slider("Fatigue", min_value=0, max_value=100, value=30, key="opt_w_fatigue")
+            with w_cols[2]:
+                w_cost = st.slider("Cost", min_value=0, max_value=100, value=20, key="opt_w_cost")
+            with w_cols[3]:
+                w_interests = st.slider("Interests", min_value=0, max_value=100, value=15, key="opt_w_interests")
+
+            raw_total = w_time + w_fatigue + w_cost + w_interests
+            if raw_total <= 0:
+                raw_total = 1
+            optimizer_weights = {
+                "time": w_time / raw_total,
+                "fatigue": w_fatigue / raw_total,
+                "cost": w_cost / raw_total,
+                "interests": w_interests / raw_total,
+            }
+            enable_what_if = st.checkbox(
+                "Show what-if route simulations",
+                value=True,
+                key="opt_enable_what_if",
+            )
 
     if is_weekend:
         weekend_options = get_weekend_getaways(hometown, interests or [], limit=4)
@@ -522,6 +553,9 @@ if page in ("planner", "weekend"):
                         cities,
                         validated["days"],
                         interests=validated["interests"],
+                        optimization_weights=optimizer_weights,
+                        budget_per_day=validated["budget"],
+                        enable_what_if=enable_what_if,
                     )
 
                     if route_analysis:
@@ -558,6 +592,8 @@ if page in ("planner", "weekend"):
                         optimized_arcs = route_analysis.get("optimized_arcs", [])
                         replacement_suggestions = route_analysis.get("replacement_suggestions", [])
                         trim_suggestion = route_analysis.get("trim_suggestion")
+                        recommended_option = route_analysis.get("recommended_option") or {}
+                        what_if_scenarios = route_analysis.get("what_if_scenarios", [])
 
                         if route_analysis.get("missing_cities"):
                             missing_label = ", ".join(route_analysis["missing_cities"])
@@ -683,6 +719,56 @@ if page in ("planner", "weekend"):
                                 st.session_state["route_choice_label"] = "Option 1: reordered stops"
                                 st.session_state["route_autogenerate"] = True
                                 st.rerun()
+
+                        if recommended_option and recommended_option.get("order"):
+                            rec_order = recommended_option.get("order", [])
+                            rec_distance = recommended_option.get("total_distance_km", 0)
+                            rec_time = recommended_option.get("total_travel_time_hrs", 0)
+                            rec_name = recommended_option.get("label", "Recommended route")
+                            rec_score = recommended_option.get("objective_score", 0)
+                            st.markdown(f"""
+                            <div class="route-strategy-card reorder">
+                              <div class="route-strategy-label">Recommended by multi-objective optimizer</div>
+                              <div class="route-strategy-title">{rec_name}</div>
+                              <div class="route-strategy-copy">
+                                Objective score: <strong>{rec_score}</strong> · {rec_distance} km · {rec_time} hrs
+                              </div>
+                              <div class="route-strategy-meta"><div class='route-metric-pill'>{' -> '.join(rec_order)}</div></div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            if st.button(
+                                "Use Recommended Route for itinerary",
+                                key="use_route_option_recommended",
+                                use_container_width=True,
+                            ):
+                                st.session_state["pending_route_plan_override"] = rec_order
+                                st.session_state["route_choice_label"] = f"Recommended: {rec_name}"
+                                st.session_state["route_autogenerate"] = True
+                                st.rerun()
+
+                        if what_if_scenarios:
+                            with st.expander("What-if simulation results", expanded=False):
+                                for idx, scenario in enumerate(what_if_scenarios):
+                                    order_preview = " -> ".join(scenario.get("order", []))
+                                    st.markdown(
+                                        f"**{scenario.get('scenario', 'Scenario')}** · "
+                                        f"{scenario.get('recommended_option', '')} · "
+                                        f"{scenario.get('total_distance_km', 0)} km · "
+                                        f"{scenario.get('total_travel_time_hrs', 0)} hrs"
+                                    )
+                                    if order_preview:
+                                        st.caption(order_preview)
+                                    if st.button(
+                                        f"Use {scenario.get('scenario', 'scenario')} route",
+                                        key=f"use_what_if_{idx}",
+                                        use_container_width=True,
+                                    ):
+                                        st.session_state["pending_route_plan_override"] = scenario.get("order", [])
+                                        st.session_state["route_choice_label"] = (
+                                            f"What-if: {scenario.get('scenario', 'scenario')}"
+                                        )
+                                        st.session_state["route_autogenerate"] = True
+                                        st.rerun()
 
                         if replacement_suggestions:
                             top_swap = replacement_suggestions[0]
@@ -1052,6 +1138,32 @@ if page in ("planner", "weekend"):
                     st.markdown("**🏨 Where to stay**")
                     for s in stay:
                         st.markdown(f"- {s}")
+
+                budget_stays = get_stay_recommendations(
+                    destination=inp.get("destination", ""),
+                    budget_per_day=int(inp.get("budget", 0) or 0),
+                    limit=3,
+                )
+                if budget_stays:
+                    st.markdown("**🛏️ Nearby stay options for your budget**")
+                    for item in budget_stays:
+                        low, high = item.get("price_range_inr", [0, 0])
+                        st.markdown(
+                            f"""
+                            <div class="getaway-card">
+                              <div class="dest-name">{item.get('area', '')}</div>
+                              <div style='font-size:0.82rem;color:var(--muted);margin:4px 0'>
+                                {item.get('stay_type', '')}
+                              </div>
+                              <div class="tag">₹{low:,} - ₹{high:,} / night</div>
+                              <div style='font-size:0.82rem;color:var(--muted);margin-top:6px'>
+                                {item.get('why', '')}
+                              </div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                    st.caption("Stay prices are indicative estimates based on your selected daily budget.")
             with col_b:
                 transport = data.get("local_transport", [])
                 if transport:
