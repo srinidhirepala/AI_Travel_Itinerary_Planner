@@ -172,87 +172,261 @@ def _render_landing():
 
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&family=DM+Sans:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700;800&display=swap');
 
     [data-testid="stAppViewContainer"] {
-        background: linear-gradient(135deg, #0a0e27 0%, #0f1437 50%, #151b3a 100%) !important;
+        background:
+            radial-gradient(circle at top left, rgba(244, 194, 96, 0.24), transparent 26%),
+            radial-gradient(circle at top right, rgba(26, 123, 116, 0.16), transparent 32%),
+            linear-gradient(180deg, #f8f1e8 0%, #f2e7da 100%) !important;
         min-height: 100vh;
     }
     [data-testid="stHeader"]  { display: none; }
     [data-testid="stSidebar"] { display: none; }
 
+    .land-shell {
+        position: relative;
+        min-height: 78vh;
+        padding: 3rem 1.2rem 1rem;
+    }
     .land-hero {
-        min-height: 80vh;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
+        position: relative;
+        overflow: hidden;
+        max-width: 1180px;
+        margin: 0 auto;
         text-align: center;
-        padding: 4rem 2rem 2rem;
+        padding: 3.5rem 2.2rem 2.6rem;
+        border-radius: 36px;
+        background:
+            radial-gradient(circle at top right, rgba(244, 194, 96, 0.18), transparent 28%),
+            radial-gradient(circle at left center, rgba(26, 123, 116, 0.12), transparent 32%),
+            linear-gradient(135deg, rgba(255, 252, 247, 0.96), rgba(247, 236, 221, 0.92));
+        border: 1px solid rgba(92, 72, 49, 0.1);
+        box-shadow: 0 28px 60px rgba(87, 63, 38, 0.14);
+    }
+    .land-hero::before,
+    .land-hero::after {
+        content: "";
+        position: absolute;
+        border-radius: 999px;
+        pointer-events: none;
+    }
+    .land-hero::before {
+        width: 240px;
+        height: 240px;
+        right: -80px;
+        top: -70px;
+        background: radial-gradient(circle, rgba(218, 115, 71, 0.18), rgba(218, 115, 71, 0));
+    }
+    .land-hero::after {
+        width: 220px;
+        height: 220px;
+        left: -60px;
+        bottom: -110px;
+        background: radial-gradient(circle, rgba(26, 123, 116, 0.18), rgba(26, 123, 116, 0));
+    }
+    .land-brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.8rem;
+        margin-bottom: 1.25rem;
+    }
+    .land-brand-mark {
+        width: 48px;
+        height: 48px;
+        display: grid;
+        place-items: center;
+        border-radius: 16px;
+        background: linear-gradient(135deg, #da7347 0%, #ef9c53 50%, #f5c56f 100%);
+        color: #fff9f2;
+        font-family: 'Fraunces', serif;
+        font-size: 1.35rem;
+        font-weight: 700;
+        box-shadow: 0 18px 32px rgba(218, 115, 71, 0.24);
+    }
+    .land-brand-copy {
+        text-align: left;
+    }
+    .land-brand-name {
+        font-family: 'Fraunces', serif;
+        font-size: 1.35rem;
+        font-weight: 700;
+        color: #1f2933;
+        line-height: 1;
+    }
+    .land-brand-tag {
+        margin-top: 0.2rem;
+        font-family: 'Manrope', sans-serif;
+        font-size: 0.76rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #6b665f;
     }
     .land-tag {
-        font-family: 'DM Sans', sans-serif;
-        font-size: 0.8rem; font-weight: 700;
-        letter-spacing: 0.35em; text-transform: uppercase;
-        background: linear-gradient(135deg, #6366f1, #06b6d4);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        background-clip: text; margin-bottom: 1.5rem;
+        display: inline-flex;
+        padding: 0.45rem 0.85rem;
+        border-radius: 999px;
+        border: 1px solid rgba(26, 123, 116, 0.16);
+        background: rgba(26, 123, 116, 0.08);
+        color: #1a7b74;
+        font-family: 'Manrope', sans-serif;
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
     }
     .land-h1 {
-        font-family: 'Playfair Display', serif;
-        font-size: clamp(3rem, 10vw, 6.5rem);
-        font-weight: 700; color: #f8f9fa;
-        line-height: 1.05; margin: 0 0 0.4rem; letter-spacing: -1px;
+        margin: 1.15rem auto 0.65rem;
+        max-width: 12ch;
+        font-family: 'Fraunces', serif;
+        font-size: clamp(2.45rem, 5.8vw, 4.8rem);
+        font-weight: 700;
+        color: #1f2933;
+        line-height: 1.02;
+        letter-spacing: -0.04em;
     }
     .land-h1 em {
-        font-style: italic;
-        background: linear-gradient(135deg, #6366f1, #ec4899);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        background-clip: text;
+        font-style: normal;
+        color: #da7347;
     }
     .land-sub {
-        font-family: 'DM Sans', sans-serif;
-        font-size: 1.2rem; color: #8892b0;
-        margin: 1.5rem 0 2rem; max-width: 520px; line-height: 1.7;
-    }
-    .land-divider {
-        width: 80px; height: 3px;
-        background: linear-gradient(90deg, #6366f1, #06b6d4, #ec4899);
-        margin: 0 auto 1.5rem; border-radius: 2px;
+        margin: 0 auto 2.2rem;
+        max-width: 680px;
+        font-family: 'Manrope', sans-serif;
+        font-size: 0.96rem;
+        line-height: 1.68;
+        color: #6b665f;
     }
     .land-features {
-        display: flex; gap: 2.5rem; margin: 2rem 0;
-        flex-wrap: wrap; justify-content: center;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1rem;
+        margin-top: 2.2rem;
     }
     .land-feat {
-        background: linear-gradient(135deg, rgba(21,27,58,0.5), rgba(26,34,80,0.3));
-        border: 1px solid rgba(99,102,241,0.2);
-        border-radius: 20px; padding: 2rem 2.2rem; width: 200px; text-align: center;
+        text-align: left;
+        padding: 1.25rem 1.2rem;
+        border-radius: 24px;
+        background: rgba(255, 251, 246, 0.82);
+        border: 1px solid rgba(92, 72, 49, 0.08);
+        box-shadow: 0 12px 28px rgba(104, 74, 44, 0.08);
     }
-    .land-feat .icon  { font-size: 2.5rem; margin-bottom: 0.8rem; display: inline-block; }
-    .land-feat .label { font-family: 'DM Sans', sans-serif; font-size: 0.9rem; color: #d0d4e0; line-height: 1.5; font-weight: 500; }
+    .land-feat:nth-child(1) {
+        background: linear-gradient(180deg, rgba(255, 243, 234, 0.94), rgba(255, 248, 241, 0.88));
+    }
+    .land-feat:nth-child(2) {
+        background: linear-gradient(180deg, rgba(255, 247, 226, 0.94), rgba(255, 250, 241, 0.88));
+    }
+    .land-feat:nth-child(3) {
+        background: linear-gradient(180deg, rgba(237, 248, 246, 0.94), rgba(248, 252, 251, 0.88));
+    }
+    .land-feat:nth-child(4) {
+        background: linear-gradient(180deg, rgba(243, 240, 255, 0.94), rgba(252, 249, 255, 0.88));
+    }
+    .land-feat .icon  {
+        width: 48px;
+        height: 48px;
+        display: grid;
+        place-items: center;
+        border-radius: 16px;
+        background: rgba(218, 115, 71, 0.12);
+        font-size: 1.45rem;
+        margin-bottom: 0.9rem;
+    }
+    .land-feat:nth-child(1) .icon {
+        background: rgba(227, 107, 70, 0.16);
+    }
+    .land-feat:nth-child(2) .icon {
+        background: rgba(215, 160, 63, 0.16);
+    }
+    .land-feat:nth-child(3) .icon {
+        background: rgba(15, 139, 128, 0.16);
+    }
+    .land-feat:nth-child(4) .icon {
+        background: rgba(79, 115, 239, 0.14);
+    }
+    .land-feat .label {
+        font-family: 'Manrope', sans-serif;
+        font-size: 0.88rem;
+        color: #3d4a53;
+        line-height: 1.55;
+        font-weight: 700;
+    }
     .google-btn {
-        display: inline-flex; align-items: center; gap: 12px;
-        background: #fff; color: #3c4043;
-        border: 1px solid #dadce0; border-radius: 4px;
-        padding: 10px 24px; font-family: 'DM Sans', sans-serif;
-        font-size: 1rem; font-weight: 500;
-        text-decoration: none; cursor: pointer;
-        transition: box-shadow 0.2s; margin-bottom: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        width: 100%;
+        max-width: 360px;
+        background: rgba(255, 252, 247, 0.96);
+        color: #2f3b43;
+        border: 1px solid rgba(92, 72, 49, 0.12);
+        border-radius: 18px;
+        padding: 0.9rem 1.25rem;
+        font-family: 'Manrope', sans-serif;
+        font-size: 1rem;
+        font-weight: 800;
+        text-decoration: none;
+        box-shadow: 0 16px 30px rgba(87, 63, 38, 0.1);
+        transition: transform 0.18s ease, box-shadow 0.18s ease;
     }
-    .google-btn:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+    .google-btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 20px 34px rgba(87, 63, 38, 0.14);
+    }
+    .land-or {
+        text-align: center;
+        color: #7a7269;
+        margin: 0.6rem 0 0.9rem;
+        font-family: 'Manrope', sans-serif;
+        font-size: 0.9rem;
+        font-weight: 700;
+    }
+    @media (max-width: 900px) {
+        .land-hero {
+            padding: 2.5rem 1.3rem 2rem;
+            border-radius: 28px;
+        }
+        .land-features {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+    @media (max-width: 640px) {
+        .land-shell {
+            padding-top: 1.6rem;
+        }
+        .land-features {
+            grid-template-columns: 1fr;
+        }
+        .land-brand {
+            flex-direction: column;
+        }
+        .land-brand-copy {
+            text-align: center;
+        }
+    }
     </style>
 
-    <div class="land-hero">
-        <div class="land-tag">✦ AI Travel Planner</div>
-        <h1 class="land-h1">Your Journey,<br>Personalized with <em>AI</em></h1>
-        <div class="land-divider"></div>
-        <p class="land-sub">Get intelligent day-by-day itineraries powered by Groq LLaMA AI. Tailored to your budget, interests, and travel style.</p>
-        <div class="land-features">
-            <div class="land-feat"><div class="icon">🤖</div><div class="label">AI-Generated Itineraries</div></div>
-            <div class="land-feat"><div class="icon">💰</div><div class="label">Smart Budget Planning</div></div>
-            <div class="land-feat"><div class="icon">❤️</div><div class="label">Save Your Favorites</div></div>
-            <div class="land-feat"><div class="icon">✨</div><div class="label">Personalized Recommendations</div></div>
+    <div class="land-shell">
+        <div class="land-hero">
+            <div class="land-brand">
+                <div class="land-brand-mark">W</div>
+                <div class="land-brand-copy">
+                    <div class="land-brand-name">Wandr</div>
+                    <div class="land-brand-tag">AI Travel Design Studio</div>
+                </div>
+            </div>
+            <div class="land-tag">Craft better journeys</div>
+            <h1 class="land-h1">Plan trips that feel <em>crafted</em>, not generated.</h1>
+            <p class="land-sub">Build day-by-day itineraries with route logic, food-aware suggestions, budget planning, saved histories, and recommendations tuned to your travel style.</p>
+            <div class="land-features">
+                <div class="land-feat"><div class="icon">🤖</div><div class="label">AI-curated travel itinerary planners for all places and moods</div></div>
+                <div class="land-feat"><div class="icon">💰</div><div class="label">Budget-aware plans for quick breaks and long routes</div></div>
+                <div class="land-feat"><div class="icon">🗺️</div><div class="label">Multi-stop trip logic with route guidance and nearby picks</div></div>
+                <div class="land-feat"><div class="icon">✨</div><div class="label">Profiles, liked places, and personalized recommendations</div></div>
+            </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -273,9 +447,3 @@ def _render_landing():
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("<div style='text-align:center; color:#666; margin: 8px 0;'>or</div>",
-                    unsafe_allow_html=True)
-
-        if st.button("🚀 Continue with Demo Mode", use_container_width=True):
-            st.session_state.demo_mode = True
-            st.rerun()
