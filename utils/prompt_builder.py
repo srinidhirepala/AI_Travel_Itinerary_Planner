@@ -61,6 +61,16 @@ def build_itinerary_prompt(
     }
 
     route_guidance = ""
+    route_order_guidance = ""
+    if route_analysis:
+        chosen_order = route_analysis.get("current_order", [])
+        if isinstance(chosen_order, list) and len(chosen_order) > 1:
+            route_order_guidance = (
+                "\nMANDATORY ROUTE ORDER:\n"
+                f"- Follow this exact city sequence for day-wise planning: {' -> '.join(chosen_order)}.\n"
+                "- Do not reshuffle this order unless explicitly asked by the user.\n"
+            )
+
     if route_analysis and route_analysis.get("burnout_risk") in ["HIGH", "MEDIUM"]:
         optimized_guidance = ""
         optimized_order = route_analysis.get("optimized_order", [])
@@ -113,6 +123,7 @@ TRAVELER DETAILS:
 - Travel Style / Pace: {travel_style}
 {hometown_guidance}{weekend_guidance}
 {route_guidance}
+{route_order_guidance}
 
 REQUIREMENTS:
 - Provide hour-by-hour schedule with real place names

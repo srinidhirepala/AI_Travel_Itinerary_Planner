@@ -14,7 +14,6 @@ from utils.prompt_builder import build_itinerary_prompt, build_recommendations_p
 from utils.recommendations import get_recommendations
 from utils.route_intelligence import analyze_route
 from utils.weekend_getaways import get_weekend_getaways
-from utils.stay_recommendations import get_stay_recommendations
 from utils.validation import validate_trip_params, ValidationError
 from utils.error_handler import ErrorHandler
 from utils.rate_limiter import itinerary_limiter
@@ -1104,7 +1103,6 @@ if page in ("planner", "weekend"):
             bd = data.get("budget_breakdown", {})
             if bd:
                 labels = {
-                    "accommodation_per_night": "🏨 Accommodation / night",
                     "food_per_day": "🍽️ Food / day",
                     "transport_per_day": "🚌 Transport / day",
                     "activities_total": "🎟️ Activities (total)",
@@ -1131,45 +1129,11 @@ if page in ("planner", "weekend"):
                 st.markdown(f'<div class="tip-chip">{tip}</div>', unsafe_allow_html=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
-            col_a, col_b = st.columns(2)
-            with col_a:
-                stay = data.get("best_areas_to_stay", [])
-                if stay:
-                    st.markdown("**🏨 Where to stay**")
-                    for s in stay:
-                        st.markdown(f"- {s}")
-
-                budget_stays = get_stay_recommendations(
-                    destination=inp.get("destination", ""),
-                    budget_per_day=int(inp.get("budget", 0) or 0),
-                    limit=3,
-                )
-                if budget_stays:
-                    st.markdown("**🛏️ Nearby stay options for your budget**")
-                    for item in budget_stays:
-                        low, high = item.get("price_range_inr", [0, 0])
-                        st.markdown(
-                            f"""
-                            <div class="getaway-card">
-                              <div class="dest-name">{item.get('area', '')}</div>
-                              <div style='font-size:0.82rem;color:var(--muted);margin:4px 0'>
-                                {item.get('stay_type', '')}
-                              </div>
-                              <div class="tag">₹{low:,} - ₹{high:,} / night</div>
-                              <div style='font-size:0.82rem;color:var(--muted);margin-top:6px'>
-                                {item.get('why', '')}
-                              </div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-                    st.caption("Stay prices are indicative estimates based on your selected daily budget.")
-            with col_b:
-                transport = data.get("local_transport", [])
-                if transport:
-                    st.markdown("**🚌 Getting around**")
-                    for t in transport:
-                        st.markdown(f"- {t}")
+            transport = data.get("local_transport", [])
+            if transport:
+                st.markdown("**🚌 Getting around**")
+                for t in transport:
+                    st.markdown(f"- {t}")
 
         # ── Nearby destinations tab ───────────────────────────────────────────
         with tabs[n + 2]:

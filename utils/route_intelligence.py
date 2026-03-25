@@ -2,6 +2,13 @@ import itertools
 import math
 from typing import Any, Dict, List, Tuple
 
+DEFAULT_OPTIMIZATION_WEIGHTS = {
+    "time": 0.35,
+    "fatigue": 0.30,
+    "cost": 0.20,
+    "interests": 0.15,
+}
+
 # Approximate coordinates for major Indian tourist destinations.
 # Coordinates are stored as (latitude, longitude).
 CITY_COORDINATES = {
@@ -162,6 +169,93 @@ def estimate_travel_time_hours(distance_km: float) -> float:
 
 def _city_tags(city_name: str) -> set[str]:
     return CITY_TAGS.get(_normalize_city_name(city_name), set())
+
+
+def _normalize_weights(custom_weights: Dict[str, float] | None) -> Dict[str, float]:
+    if not custom_weights:
+        return DEFAULT_OPTIMIZATION_WEIGHTS.copy()
+
+    merged = DEFAULT_OPTIMIZATION_WEIGHTS.copy()
+    for key in merged:
+        raw = custom_weights.get(key, merged[key])
+        try:
+            merged[key] = max(0.0, float(raw))
+        except (TypeError, ValueError):
+            pass
+
+    total = sum(merged.values())
+    if total <= 0:
+        return DEFAULT_OPTIMIZATION_WEIGHTS.copy()
+
+    return {k: (v / total) for k, v in merged.items()}
+
+
+def _interest_coverage_score(cities: List[str], interests: List[str] | None) -> float:
+    interests_set = set(interests or [])
+    if not cities or not interests_set:
+        return 0.0
+
+    cumulative = 0.0
+    for city in cities:
+        tags = _city_tags(city)
+        if not tags:
+            continue
+        cumulative += len(tags & interests_set) / max(1, len(interests_set))
+
+    return cumulative / max(1, len(cities))
+
+
+def _transport_cost_proxy(total_distance_km: int, budget_per_day: int | None, total_days: int) -> float:
+    estimated_transport = max(0.0, total_distance_km * 6.0)
+    if not budget_per_day or total_days <= 0:
+        return estimated_transport
+    total_budget = budget_per_day * total_days
+    if total_budget <= 0:
+        return estimated_transport
+    return estimated_transport / total_budget
+
+
+def _rank_route_candidates(
+    candidates: List[Dict[str, Any]],
+    weights: Dict[str, float],
+) -> List[Dict[str, Any]]:
+    if not candidates:
+        return []
+
+    metrics = {
+        "time": [c["time_metric"] for c in candidates],
+        "fatigue": [c["fatigue_metric"] for c in candidates],
+        "cost": [c["cost_metric"] for c in candidates],
+        "interests": [c["interest_metric"] for c in candidates],
+    }
+
+    bounds = {}
+    for key, values in metrics.items():
+        minimum = min(values)
+        maximum = max(values)
+        bounds[key] = (minimum, maximum)
+
+    def _scale(value: float, key: str) -> float:
+        minimum, maximum = bounds[key]
+        if abs(maximum - minimum) < 1e-9:
+            return 0.0
+        return (value - minimum) / (maximum - minimum)
+
+    ranked = []
+    for candidate in candidates:
+        time_penalty = _scale(candidate["time_metric"], "time")
+        fatigue_penalty = _scale(candidate["fatigue_metric"], "fatigue")
+        cost_penalty = _scale(candidate["cost_metric"], "cost")
+        interest_penalty = 1.0 - _scale(candidate["interest_metric"], "interests")
+        objective_score = (
+            weights["time"] * time_penalty
+            + weights["fatigue"] * fatigue_penalty
+            + weights["cost"] * cost_penalty
+            + weights["interests"] * interest_penalty
+        )
+        ranked.append({**candidate, "objective_score": round(objective_score, 4)})
+
+    return sorted(ranked, key=lambda c: c["objective_score"])
 
 
 def _route_payload(cities: List[str]) -> Dict[str, Any]:
@@ -452,7 +546,14 @@ def _build_trim_suggestion(cities: List[str], current_payload: Dict[str, Any]) -
     return best_suggestion
 
 
-def analyze_route(cities: List[str], total_days: int, interests: List[str] | None = None) -> Dict[str, Any]:
+def analyze_route(
+    cities: List[str],
+    total_days: int,
+    interests: List[str] | None = None,
+    optimization_weights: Dict[str, float] | None = None,
+    budget_per_day: int | None = None,
+    enable_what_if: bool = True,
+) -> Dict[str, Any]:
     """
     Analyze a multi-city route for efficiency, total travel time, and burnout risk.
     Also returns two recovery strategies for high-fatigue routes:
@@ -482,6 +583,9 @@ def analyze_route(cities: List[str], total_days: int, interests: List[str] | Non
             "travel_percentage_reduction": 0,
             "replacement_suggestions": [],
             "trim_suggestion": None,
+            "optimization_weights_applied": _normalize_weights(optimization_weights),
+            "recommended_option": None,
+            "what_if_scenarios": [],
         }
 
     current_payload = _route_payload(cities)
@@ -508,6 +612,107 @@ def analyze_route(cities: List[str], total_days: int, interests: List[str] | Non
     if should_suggest_recovery:
         replacement_suggestions = _build_replacement_suggestions(cities, interests, current_payload)
         trim_suggestion = _build_trim_suggestion(cities, current_payload)
+
+    applied_weights = _normalize_weights(optimization_weights)
+    candidates = [
+        {
+            "option_key": "current",
+            "label": "Current route",
+            "order": cities[:],
+            "path": current_payload["valid_path"],
+            "arcs": current_payload["arcs"],
+            "total_distance_km": current_payload["total_distance_km"],
+            "total_travel_time_hrs": current_payload["total_travel_time_hrs"],
+            "travel_percentage": route_state["travel_percentage"],
+            "interest_score": _interest_coverage_score(cities, interests),
+        },
+        {
+            "option_key": "reorder",
+            "label": "Reordered route",
+            "order": optimized_order,
+            "path": optimized_payload["valid_path"],
+            "arcs": optimized_payload["arcs"],
+            "total_distance_km": optimized_payload["total_distance_km"],
+            "total_travel_time_hrs": optimized_payload["total_travel_time_hrs"],
+            "travel_percentage": optimized_state["travel_percentage"],
+            "interest_score": _interest_coverage_score(optimized_order, interests),
+        },
+    ]
+
+    if replacement_suggestions:
+        first_swap = replacement_suggestions[0]
+        candidates.append(
+            {
+                "option_key": "replacement",
+                "label": "Nearby replacement route",
+                "order": first_swap.get("suggested_order", cities[:]),
+                "path": first_swap.get("suggested_path", []),
+                "arcs": first_swap.get("suggested_arcs", []),
+                "total_distance_km": first_swap.get("suggested_total_distance_km", current_payload["total_distance_km"]),
+                "total_travel_time_hrs": first_swap.get("suggested_total_travel_time_hrs", current_payload["total_travel_time_hrs"]),
+                "travel_percentage": _travel_percentage(
+                    first_swap.get("suggested_total_travel_time_hrs", current_payload["total_travel_time_hrs"]),
+                    total_days,
+                ),
+                "interest_score": _interest_coverage_score(first_swap.get("suggested_order", cities[:]), interests),
+            }
+        )
+
+    if trim_suggestion:
+        candidates.append(
+            {
+                "option_key": "trim",
+                "label": "Trimmed route",
+                "order": trim_suggestion.get("suggested_order", cities[:]),
+                "path": trim_suggestion.get("suggested_path", []),
+                "arcs": trim_suggestion.get("suggested_arcs", []),
+                "total_distance_km": trim_suggestion.get("suggested_total_distance_km", current_payload["total_distance_km"]),
+                "total_travel_time_hrs": trim_suggestion.get("suggested_total_travel_time_hrs", current_payload["total_travel_time_hrs"]),
+                "travel_percentage": _travel_percentage(
+                    trim_suggestion.get("suggested_total_travel_time_hrs", current_payload["total_travel_time_hrs"]),
+                    total_days,
+                ),
+                "interest_score": _interest_coverage_score(trim_suggestion.get("suggested_order", cities[:]), interests),
+            }
+        )
+
+    for candidate in candidates:
+        candidate["time_metric"] = float(candidate["total_travel_time_hrs"])
+        candidate["fatigue_metric"] = float(candidate["travel_percentage"])
+        candidate["cost_metric"] = _transport_cost_proxy(
+            int(candidate["total_distance_km"]),
+            budget_per_day,
+            total_days,
+        )
+        candidate["interest_metric"] = float(candidate["interest_score"])
+
+    ranked_candidates = _rank_route_candidates(candidates, applied_weights)
+    recommended_option = ranked_candidates[0] if ranked_candidates else None
+
+    what_if_scenarios = []
+    if enable_what_if and len(cities) > 2:
+        scenario_weights = [
+            ("Time First", {"time": 0.60, "fatigue": 0.20, "cost": 0.15, "interests": 0.05}),
+            ("Low Fatigue", {"time": 0.20, "fatigue": 0.60, "cost": 0.10, "interests": 0.10}),
+            ("Budget Friendly", {"time": 0.20, "fatigue": 0.15, "cost": 0.55, "interests": 0.10}),
+            ("Interest Heavy", {"time": 0.15, "fatigue": 0.20, "cost": 0.10, "interests": 0.55}),
+        ]
+        for scenario_name, scenario_weight in scenario_weights:
+            scenario_ranked = _rank_route_candidates(candidates, _normalize_weights(scenario_weight))
+            if not scenario_ranked:
+                continue
+            best = scenario_ranked[0]
+            what_if_scenarios.append(
+                {
+                    "scenario": scenario_name,
+                    "weights": _normalize_weights(scenario_weight),
+                    "recommended_option": best.get("label"),
+                    "order": best.get("order", []),
+                    "total_distance_km": best.get("total_distance_km", 0),
+                    "total_travel_time_hrs": best.get("total_travel_time_hrs", 0),
+                    "objective_score": best.get("objective_score", 0),
+                }
+            )
 
     return {
         "is_valid": len(current_payload["missing_cities"]) == 0,
@@ -537,4 +742,8 @@ def analyze_route(cities: List[str], total_days: int, interests: List[str] | Non
         ),
         "replacement_suggestions": replacement_suggestions,
         "trim_suggestion": trim_suggestion,
+        "optimization_weights_applied": applied_weights,
+        "ranked_route_options": ranked_candidates,
+        "recommended_option": recommended_option,
+        "what_if_scenarios": what_if_scenarios,
     }
