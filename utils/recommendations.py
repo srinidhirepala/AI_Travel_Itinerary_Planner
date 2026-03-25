@@ -39,14 +39,28 @@ STYLE_BOOST = {
     "Shopaholic":  ["Shopping", "Food", "Urban"],
 }
 
+MOOD_BOOST = {
+    "Relax": ["Nature", "Food"],
+    "Adventure": ["Adventure", "Nature"],
+    "Devotional": ["Culture"],
+    "Culture": ["Culture", "Photography"],
+    "Food": ["Food", "Shopping"],
+}
 
-def get_recommendations(profile: dict, liked_places: list[dict], n: int = 6) -> list[dict]:
+
+def get_recommendations(profile: dict, liked_places: list[dict], n: int = 6, context: dict | None = None) -> list[dict]:
     """
     Return top-n destination recommendations with a reason string.
     """
     user_interests = set(profile.get("interests") or [])
     travel_style   = profile.get("travel_style", "Explorer")
     style_tags     = set(STYLE_BOOST.get(travel_style, []))
+    context = context or {}
+    mood = context.get("mood", "")
+    mood_tags = set(MOOD_BOOST.get(mood, []))
+    current_location = context.get("current_location", "")
+    time_window_type = context.get("time_window_type", "Days")
+    time_window_value = context.get("time_window_value", 0)
 
     # Build country affinity from liked places
     liked_countries = Counter(p["country"] for p in liked_places if p.get("country"))
@@ -60,9 +74,15 @@ def get_recommendations(profile: dict, liked_places: list[dict], n: int = 6) -> 
         dest_tags = set(dest["tags"])
         interest_overlap = dest_tags & user_interests
         style_overlap    = dest_tags & style_tags
+        mood_overlap     = dest_tags & mood_tags
         country_score    = liked_countries.get(dest["country"], 0) * 1.5
 
-        score = len(interest_overlap) * 2 + len(style_overlap) + country_score
+        score = len(interest_overlap) * 2 + len(style_overlap) + len(mood_overlap) + country_score
+
+        # Prefer nearby domestic suggestions for short time windows
+        if current_location and time_window_type == "Hours" and time_window_value and time_window_value <= 12:
+            if dest.get("country") == "India":
+                score += 1.5
 
         if score == 0:
             continue
@@ -76,7 +96,26 @@ def get_recommendations(profile: dict, liked_places: list[dict], n: int = 6) -> 
         if liked_countries.get(dest["country"], 0) > 0:
             reason += f" · You've liked {dest['country']} before"
 
-        scored.append({**dest, "score": score, "reason": reason})
+        if current_location:
+            transport_hint = f"Best reached from {current_location} by flight/train based on budget and time"
+        else:
+            transport_hint = "Best reached by flight/train based on budget"
+
+        if time_window_type == "Hours" and time_window_value:
+            budget_level = "Quick escape"
+        elif time_window_type == "Days" and time_window_value and time_window_value <= 3:
+            budget_level = "Short trip"
+        else:
+            budget_level = "Flexible trip"
+
+        scored.append({
+            **dest,
+            "score": score,
+            "reason": reason,
+            "budget_level": budget_level,
+            "best_time": "Oct-Mar",
+            "transport_hint": transport_hint,
+        })
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:n]

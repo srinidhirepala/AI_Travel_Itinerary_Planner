@@ -5,13 +5,17 @@ import logging
 import streamlit as st
 from typing import Callable, Any
 import traceback
+from pathlib import Path
+
+LOG_DIR = Path(__file__).parent.parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/app.log'),
+        logging.FileHandler(LOG_DIR / 'app.log'),
         logging.StreamHandler()
     ]
 )

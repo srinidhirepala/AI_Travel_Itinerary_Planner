@@ -65,7 +65,7 @@ def validate_trip_params(
         errors.append(f"Budget must be between ₹{MIN_BUDGET} and ₹{MAX_BUDGET} per day")
     
     # Food preference validation
-    valid_food_prefs = ["Vegetarian", "Non-Vegetarian", "Vegan", "Jain", "Halal"]
+    valid_food_prefs = ["Vegetarian", "Non-Vegetarian", "Both (Veg & Non-Veg)", "Vegan", "Jain", "Halal"]
     if food_pref not in valid_food_prefs:
         errors.append(f"Food preference must be one of: {', '.join(valid_food_prefs)}")
     

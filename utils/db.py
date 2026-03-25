@@ -39,6 +39,7 @@ def init_db():
             interests       TEXT DEFAULT '[]',   -- JSON list
             home_city       TEXT DEFAULT '',
             travel_style    TEXT DEFAULT 'Explorer',
+            budget_default  INTEGER DEFAULT 2000,
             updated_at      TEXT DEFAULT (datetime('now'))
         );
 
@@ -64,6 +65,13 @@ def init_db():
             created_at  TEXT DEFAULT (datetime('now'))
         );
         """)
+
+        # Lightweight migration for existing DBs created before budget_default existed
+        profile_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(profiles)").fetchall()
+        }
+        if "budget_default" not in profile_cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN budget_default INTEGER DEFAULT 2000")
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -94,25 +102,27 @@ def get_profile(user_id: str) -> Dict[str, Any]:
         row = conn.execute("SELECT * FROM profiles WHERE user_id=?", (user_id,)).fetchone()
         if not row:
             return {"user_id": user_id, "food_pref": "Vegetarian",
-                    "interests": [], "home_city": "", "travel_style": "Explorer"}
+                    "interests": [], "home_city": "", "travel_style": "Explorer", "budget_default": 2000}
         d = dict(row)
         d["interests"] = json.loads(d.get("interests") or "[]")
+        d["budget_default"] = int(d.get("budget_default") or 2000)
         return d
 
 
 def save_profile(user_id: str, food_pref: str, interests: list,
-                 home_city: str, travel_style: str):
+                 home_city: str, travel_style: str, budget_default: int = 2000):
     with _conn() as conn:
         conn.execute("""
-            INSERT INTO profiles (user_id, food_pref, interests, home_city, travel_style, updated_at)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            INSERT INTO profiles (user_id, food_pref, interests, home_city, travel_style, budget_default, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(user_id) DO UPDATE SET
                 food_pref=excluded.food_pref,
                 interests=excluded.interests,
                 home_city=excluded.home_city,
                 travel_style=excluded.travel_style,
+                budget_default=excluded.budget_default,
                 updated_at=excluded.updated_at
-        """, (user_id, food_pref, json.dumps(interests), home_city, travel_style))
+        """, (user_id, food_pref, json.dumps(interests), home_city, travel_style, budget_default))
 
 
 # ── Liked places ──────────────────────────────────────────────────────────────
