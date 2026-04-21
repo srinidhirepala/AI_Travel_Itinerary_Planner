@@ -4,20 +4,23 @@ Wandr — AI Travel Itinerary Planner
 import streamlit as st
 import os
 import html
-from utils.styles import GLOBAL_CSS
-from utils.auth import render_login, logout
-from utils.db import (init_db, save_itinerary, get_itineraries,
+from pathlib import Path
+from dotenv import load_dotenv
+from src.utils.common.styles import GLOBAL_CSS
+from src.utils.auth.auth import render_login, logout
+from src.utils.database.db import (init_db, save_itinerary, get_itineraries,
                       get_itinerary_data, delete_itinerary,
                       get_profile, save_profile)
-from utils.llm_handler import LLMHandler
-from utils.prompt_builder import build_itinerary_prompt, build_recommendations_prompt
-from utils.recommendations import get_recommendations
-from utils.route_intelligence import analyze_route
-from utils.weekend_getaways import get_weekend_getaways
-from utils.validation import validate_trip_params, ValidationError
-from utils.error_handler import ErrorHandler
-from utils.rate_limiter import itinerary_limiter
-from utils.constants import (
+from src.utils.llm.llm_handler import LLMHandler
+from src.utils.llm.prompt_builder import build_itinerary_prompt, build_recommendations_prompt
+from src.utils.recommendations.recommendations import get_recommendations
+from src.utils.route.route_intelligence import analyze_route
+from src.utils.recommendations.weekend_getaways import get_weekend_getaways
+from src.utils.common.cache import get_cached_route_analysis, get_cached_weekend_getaways, get_cache_stats
+from src.utils.common.validation import validate_trip_params, ValidationError
+from src.utils.common.error_handler import ErrorHandler
+from src.utils.common.rate_limiter import itinerary_limiter
+from src.utils.common.constants import (
     FOOD_PREFERENCES,
     ALL_INTERESTS,
     TRAVEL_STYLES,
@@ -44,6 +47,17 @@ LEGACY_NAV_MAP = {
     "👤 Profile": "Profile",
 }
 
+# Load environment variables from the new config location, with legacy fallback.
+_ROOT_DIR = Path(__file__).resolve().parent
+_ENV_CANDIDATES = [
+    _ROOT_DIR / "config" / ".env",
+    _ROOT_DIR / ".env",
+]
+for _env_path in _ENV_CANDIDATES:
+    if _env_path.exists():
+        load_dotenv(dotenv_path=_env_path, override=False)
+        break
+
 def _apply_planner_route_to_state(cities: list[str]) -> None:
     """Populate the planner widgets from a suggested route."""
     clean_cities = [city.strip() for city in cities if city and city.strip()]
@@ -51,13 +65,12 @@ def _apply_planner_route_to_state(cities: list[str]) -> None:
         return
 
     previous_stop_count = int(st.session_state.get("dest_count", 1) or 1)
-    st.session_state["start_city"] = clean_cities[0]
-    st.session_state["dest_count"] = max(1, len(clean_cities) - 1)
+    st.session_state["dest_count"] = max(1, len(clean_cities))
 
-    for idx, city in enumerate(clean_cities[1:]):
+    for idx, city in enumerate(clean_cities):
         st.session_state[f"stop_{idx}"] = city
 
-    for idx in range(len(clean_cities) - 1, previous_stop_count):
+    for idx in range(len(clean_cities), previous_stop_count):
         stale_key = f"stop_{idx}"
         if stale_key in st.session_state:
             del st.session_state[stale_key]
@@ -191,6 +204,14 @@ for key, default in [
 if st.session_state.get("pending_nav"):
     pending_nav = st.session_state.pop("pending_nav")
     st.session_state["nav_select"] = LEGACY_NAV_MAP.get(pending_nav, pending_nav)
+
+# Clear itinerary when user navigates away from planner/weekend pages
+_active_page = NAV_PAGE_MAP.get(st.session_state.get("nav_select"))
+_prev_page = st.session_state.get("_last_page")
+if _prev_page in ("planner", "weekend") and _active_page not in ("planner", "weekend"):
+    st.session_state["itinerary"] = None
+    st.session_state["last_inputs"] = {}
+st.session_state["_last_page"] = _active_page
 
 if st.session_state.get("pending_route_plan_override"):
     _apply_planner_route_to_state(st.session_state.pop("pending_route_plan_override"))
@@ -348,9 +369,7 @@ if page in ("planner", "weekend"):
                 st.session_state.dest_count -= 1
                 st.rerun()
 
-        destination = ", ".join(
-            ([start_city.strip()] if start_city.strip() else []) + stops
-        )
+        destination = ", ".join(stops)
 
     pref_cols = st.columns([1.1, 1.9], gap="medium")
     saved_food = prof.get("food_pref", "Vegetarian")
@@ -400,7 +419,8 @@ if page in ("planner", "weekend"):
             )
 
     if is_weekend:
-        weekend_options = get_weekend_getaways(hometown, interests or [], limit=4)
+        # Use cached weekend getaways
+        weekend_options = get_cached_weekend_getaways(hometown, interests or [], limit=4)
         option_names = [option["name"] for option in weekend_options]
         current_selection = st.session_state.get("wk_selected_getaway")
 
@@ -506,13 +526,16 @@ if page in ("planner", "weekend"):
         dest_to_use = (destination or "").strip()
         if is_weekend and not hometown.strip():
             st.error("Please enter your home city first.")
+        elif not is_weekend and not start_city.strip():
+            st.error("Please enter your starting location.")
         elif is_weekend and not dest_to_use:
             st.error("Please choose one of the nearby weekend getaway options before generating the trip.")
         elif not dest_to_use:
-            st.error("Please enter a destination or your home city.")
+            st.error("Please enter at least one destination stop for sightseeing.")
         else:
             current_inputs = {
                 "destination": dest_to_use,
+                "start_city": hometown.strip() if is_weekend else start_city.strip(),
                 "days": days,
                 "budget": budget,
                 "food_pref": food_pref,
@@ -521,8 +544,9 @@ if page in ("planner", "weekend"):
                 "home_city": hometown.strip() if is_weekend else "",
             }
 
-            if current_inputs != st.session_state.last_inputs:
-                st.session_state.itinerary = None
+            # Always clear previous itinerary when a new generation starts
+            st.session_state.itinerary = None
+            st.session_state.last_inputs = {}
 
             # Progressive status updates
             progress_col = st.columns(1)[0]
@@ -543,13 +567,47 @@ if page in ("planner", "weekend"):
                 
                 status_text.info("🗺️ Analyzing your route...")
 
+                # ── Budget feasibility check (planner only) ────────────────
+                if not is_weekend:
+                    from src.utils.common.budget_validator import check_budget_feasibility, format_budget_warning
+                    _cities_for_budget = [c.strip() for c in dest_to_use.split(",") if c.strip()]
+                    if start_city.strip() and (
+                        not _cities_for_budget or _cities_for_budget[0].lower() != start_city.strip().lower()
+                    ):
+                        _cities_for_budget = [start_city.strip()] + _cities_for_budget
+                    _dist_for_budget = 0
+                    if len(_cities_for_budget) > 1:
+                        from src.utils.route.route_intelligence import get_city_coords, haversine_distance
+                        for _i in range(len(_cities_for_budget) - 1):
+                            _c1 = get_city_coords(_cities_for_budget[_i])
+                            _c2 = get_city_coords(_cities_for_budget[_i + 1])
+                            if _c1 and _c2:
+                                _dist_for_budget += haversine_distance(_c1, _c2)
+                    _budget_ok, _budget_feasibility = check_budget_feasibility(
+                        user_budget_per_day=validated["budget"],
+                        days=validated["days"],
+                        destination=validated["destination"],
+                        cities=_cities_for_budget,
+                        total_distance_km=_dist_for_budget,
+                        food_pref=validated["food_pref"],
+                    )
+                    st.markdown(format_budget_warning(_budget_feasibility), unsafe_allow_html=True)
+                    if not _budget_ok:
+                        if not st.checkbox("I understand my budget is tight — proceed anyway", key="budget_override"):
+                            st.stop()
+
                 # ── Route analysis (all stops, bug fixed) ────────────────
                 cities = [c.strip() for c in dest_to_use.split(",") if c.strip()]
+                analysis_cities = cities
+                if not is_weekend and start_city.strip():
+                    if not cities or cities[0].lower() != start_city.strip().lower():
+                        analysis_cities = [start_city.strip()] + cities
                 route_analysis = None
 
-                if len(cities) > 1:
-                    route_analysis = analyze_route(
-                        cities,
+                if len(analysis_cities) > 1:
+                    # Use cached route analysis to avoid expensive recalculations
+                    route_analysis = get_cached_route_analysis(
+                        analysis_cities,
                         validated["days"],
                         interests=validated["interests"],
                         optimization_weights=optimizer_weights,
@@ -583,272 +641,133 @@ if page in ("planner", "weekend"):
                         for j in route_analysis.get("illogical_jumps", []):
                             st.warning(f"Long jump: {j}")
 
-                        # FIXED: Complete multi-stop route map (all arcs)
+                        # ── Transport options per leg ────────────────────────────────
+                        leg_details = route_analysis.get("leg_details", [])
+                        if leg_details:
+                            from src.utils.route.transport_recommender import get_transport_summary
+                            with st.expander("🚌 Transport options per leg", expanded=True):
+                                for leg in leg_details:
+                                    transport = get_transport_summary(
+                                        leg["from"], leg["to"],
+                                        leg["distance_km"], validated["budget"]
+                                    )
+                                    st.markdown(
+                                        f"**{leg['from']} → {leg['to']}** · "
+                                        f"{leg['distance_km']} km · ~{leg['travel_time_hrs']} hrs"
+                                    )
+                                    if transport.get("available"):
+                                        t_cols = st.columns(len(transport["all_options"]))
+                                        for t_col, opt in zip(t_cols, transport["all_options"]):
+                                            with t_col:
+                                                st.markdown(
+                                                    f"{opt.icon} **{opt.mode}**  \n"
+                                                    f"₹{opt.cost_per_person:,}/person  \n"
+                                                    f"~{opt.duration_hours:.1f} hrs  \n"
+                                                    f"{opt.booking_hint}"
+                                                )
+                                    else:
+                                        st.caption(transport.get("message", "Local transport recommended."))
+                                    st.divider()
+
+                        # ── Route map + clean 2-option optimizer ────────────────────────
+                        vp   = route_analysis.get("valid_path", [])
                         arcs = route_analysis.get("arcs", [])
-                        vp = route_analysis.get("valid_path", [])
                         optimized_order = route_analysis.get("optimized_order", [])
-                        optimized_path = route_analysis.get("optimized_path", [])
-                        optimized_arcs = route_analysis.get("optimized_arcs", [])
+                        optimized_path  = route_analysis.get("optimized_path", [])
+                        optimized_arcs  = route_analysis.get("optimized_arcs", [])
                         replacement_suggestions = route_analysis.get("replacement_suggestions", [])
                         trim_suggestion = route_analysis.get("trim_suggestion")
-                        recommended_option = route_analysis.get("recommended_option") or {}
-                        what_if_scenarios = route_analysis.get("what_if_scenarios", [])
 
                         if route_analysis.get("missing_cities"):
-                            missing_label = ", ".join(route_analysis["missing_cities"])
-                            st.info(
-                                f"Map coverage is partial right now. I couldn't place: {missing_label}."
-                            )
+                            st.info(f"Map coverage partial — couldn't place: {', '.join(route_analysis['missing_cities'])}")
 
-                        if vp:
-                            _render_route_map(
-                                "Travel Map - Current Route",
-                                vp,
-                                arcs,
-                                [218, 115, 71, 220],
-                                [26, 123, 116, 235],
-                            )
+                        # Build the two best alternatives
+                        alt_a = None  # Reorder (same cities, better sequence)
+                        alt_b = None  # Swap or Trim (change a city / drop one)
 
-                        if False:
-                            pass
-                            '''
-
-                                # Show optimized order suggestion if different
-                                opt = route_analysis.get("optimized_order", [])
-                                if opt and opt != [c["name"] for c in vp]:
-                                    burnout_improvement = f"Reduces travel time and minimizes burnout by optimizing your route"
-                                    st.info(f"""
-                                    💡 **Try This Route** — Optimized Order
-                                    
-                                    **Suggested Route:** {' → '.join(opt)}
-                                    
-                                    **Why?** {burnout_improvement}
-                                    """)
-                                    
-                                    with st.expander("📊 Route Comparison", expanded=False):
-                                        col_c1, col_c2 = st.columns(2)
-                                        with col_c1:
-                                            st.metric("📍 Current Order", "Custom", delta=f"Total: {route_analysis['total_distance_km']} km")
-                                        with col_c2:
-                                            st.metric("✨ Optimized Order", "Suggested", delta="Less travel fatigue -")
-
-                                    st.markdown("##### 🗺️ Complete Route Map — Current Route")
-
-                                    mid_lat = sum(c["coordinates"][1] for c in vp) / len(vp)
-                                    mid_lon = sum(c["coordinates"][0] for c in vp) / len(vp)
-                                    view = pdk.ViewState(
-                                        latitude=mid_lat,
-                                        longitude=mid_lon,
-                                        zoom=4.5, pitch=35,
-                                    )
-
-                                    # ALL arc pairs (not just first 2 — bug fix)
-                                    arc_layer = pdk.Layer(
-                                        "ArcLayer",
-                                        data=arcs,
-                                        get_source_position="source",
-                                        get_target_position="target",
-                                        get_source_color=[245, 158, 66, 220],
-                                        get_target_color=[56, 189, 248, 220],
-                                        get_width=4,
-                                        auto_highlight=True,
-                                        pickable=True,
-                                    )
-                                    scatter_layer = pdk.Layer(
-                                        "ScatterplotLayer",
-                                        data=vp,
-                                        get_position="coordinates",
-                                        get_color=[56, 189, 248, 255],
-                                        get_radius=30000,
-                                        pickable=True,
-                                    )
-                                    text_layer = pdk.Layer(
-                                        "TextLayer",
-                                        data=vp,
-                                        get_position="coordinates",
-                                        get_text="name",
-                                        get_size=14,
-                                        get_color=[232, 234, 240],
-                                        get_alignment_baseline="'bottom'",
-                                    )
-                                    st.pydeck_chart(pdk.Deck(
-                                        layers=[arc_layer, scatter_layer, text_layer],
-                                        initial_view_state=view,
-                                        map_style="mapbox://styles/mapbox/dark-v11",
-                                        tooltip={"text": "{source_name} → {target_name}"},
-                                    ))
-                            except ImportError:
-                                st.info("Install pydeck for route maps: pip install pydeck")
-
-                            '''
-                        show_reorder_option = (
+                        show_reorder = (
                             optimized_order
                             and optimized_order != route_analysis.get("current_order", [])
                             and route_analysis.get("distance_saved_km", 0) > 0
                         )
-                        if show_reorder_option:
-                            reorder_meta = "".join([
-                                f"<div class='route-metric-pill'>Save {route_analysis['distance_saved_km']} km</div>",
-                                f"<div class='route-metric-pill'>Save {route_analysis['time_saved_hrs']} hrs</div>",
-                                f"<div class='route-metric-pill'>{' -> '.join(optimized_order)}</div>",
-                            ])
-                            st.markdown(f"""
-                            <div class="route-strategy-card reorder">
-                              <div class="route-strategy-label">Option 1 - Reorder Stops</div>
-                              <div class="route-strategy-title">Cover the same places with less fatigue</div>
-                              <div class="route-strategy-copy">
-                                Reordering the trip reduces backtracking and keeps all of your selected places.
-                              </div>
-                              <div class="route-strategy-meta">{reorder_meta}</div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            _render_route_map(
-                                "Travel Map - Optimized Order",
-                                optimized_path,
-                                optimized_arcs,
-                                [85, 107, 214, 220],
-                                [182, 90, 122, 235],
-                            )
-                            if st.button(
-                                "Use Option 1 for itinerary",
-                                key="use_route_option_1",
-                                use_container_width=True,
-                            ):
-                                st.session_state["pending_route_plan_override"] = optimized_order
-                                st.session_state["route_choice_label"] = "Option 1: reordered stops"
-                                st.session_state["route_autogenerate"] = True
-                                st.rerun()
-
-                        if recommended_option and recommended_option.get("order"):
-                            rec_order = recommended_option.get("order", [])
-                            rec_distance = recommended_option.get("total_distance_km", 0)
-                            rec_time = recommended_option.get("total_travel_time_hrs", 0)
-                            rec_name = recommended_option.get("label", "Recommended route")
-                            rec_score = recommended_option.get("objective_score", 0)
-                            st.markdown(f"""
-                            <div class="route-strategy-card reorder">
-                              <div class="route-strategy-label">Recommended by multi-objective optimizer</div>
-                              <div class="route-strategy-title">{rec_name}</div>
-                              <div class="route-strategy-copy">
-                                Objective score: <strong>{rec_score}</strong> · {rec_distance} km · {rec_time} hrs
-                              </div>
-                              <div class="route-strategy-meta"><div class='route-metric-pill'>{' -> '.join(rec_order)}</div></div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            if st.button(
-                                "Use Recommended Route for itinerary",
-                                key="use_route_option_recommended",
-                                use_container_width=True,
-                            ):
-                                st.session_state["pending_route_plan_override"] = rec_order
-                                st.session_state["route_choice_label"] = f"Recommended: {rec_name}"
-                                st.session_state["route_autogenerate"] = True
-                                st.rerun()
-
-                        if what_if_scenarios:
-                            with st.expander("What-if simulation results", expanded=False):
-                                for idx, scenario in enumerate(what_if_scenarios):
-                                    order_preview = " -> ".join(scenario.get("order", []))
-                                    st.markdown(
-                                        f"**{scenario.get('scenario', 'Scenario')}** · "
-                                        f"{scenario.get('recommended_option', '')} · "
-                                        f"{scenario.get('total_distance_km', 0)} km · "
-                                        f"{scenario.get('total_travel_time_hrs', 0)} hrs"
-                                    )
-                                    if order_preview:
-                                        st.caption(order_preview)
-                                    if st.button(
-                                        f"Use {scenario.get('scenario', 'scenario')} route",
-                                        key=f"use_what_if_{idx}",
-                                        use_container_width=True,
-                                    ):
-                                        st.session_state["pending_route_plan_override"] = scenario.get("order", [])
-                                        st.session_state["route_choice_label"] = (
-                                            f"What-if: {scenario.get('scenario', 'scenario')}"
-                                        )
-                                        st.session_state["route_autogenerate"] = True
-                                        st.rerun()
+                        if show_reorder:
+                            alt_a = {
+                                "label": "Reorder stops",
+                                "desc": f"Same cities, smarter sequence — saves {route_analysis['distance_saved_km']} km and {route_analysis['time_saved_hrs']} hrs",
+                                "order": optimized_order,
+                                "path": optimized_path,
+                                "arcs": optimized_arcs,
+                                "key": "opt_reorder",
+                                "choice_label": "Reordered stops",
+                                "src_color": [85, 107, 214, 220],
+                                "tgt_color": [182, 90, 122, 235],
+                            }
 
                         if replacement_suggestions:
                             top_swap = replacement_suggestions[0]
                             tags = ", ".join(top_swap.get("similarity_tags", [])) or "similar vibe"
-                            swap_meta = "".join([
-                                f"<div class='route-metric-pill'>Swap {top_swap['replace_city']} -> {top_swap['replacement_city']}</div>",
-                                f"<div class='route-metric-pill'>Save about {top_swap['distance_saved_km']} km</div>",
-                                f"<div class='route-metric-pill'>{tags}</div>",
-                            ])
-                            st.markdown(f"""
-                            <div class="route-strategy-card replace">
-                              <div class="route-strategy-label">Option 2 - Nearby Similar Stop</div>
-                              <div class="route-strategy-title">Replace one exhausting leg with a closer alternative</div>
-                              <div class="route-strategy-copy">
-                                If you want to reduce fatigue further, try swapping
-                                <strong>{top_swap['replace_city']}</strong> with
-                                <strong>{top_swap['replacement_city']}</strong>.
-                              </div>
-                              <div class="route-strategy-meta">{swap_meta}</div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                            alt_b = {
+                                "label": f"Swap {top_swap['replace_city']} → {top_swap['replacement_city']}",
+                                "desc": f"Closer alternative with {tags} — saves ~{top_swap['distance_saved_km']} km",
+                                "order": top_swap.get("suggested_order", []),
+                                "path": top_swap.get("suggested_path", []),
+                                "arcs": top_swap.get("suggested_arcs", []),
+                                "key": "opt_swap",
+                                "choice_label": f"Swap {top_swap['replace_city']} with {top_swap['replacement_city']}",
+                                "src_color": [26, 123, 116, 220],
+                                "tgt_color": [244, 194, 96, 235],
+                            }
+                        elif trim_suggestion:
+                            alt_b = {
+                                "label": f"Drop {trim_suggestion['removed_city']}",
+                                "desc": f"Lighter route — saves {trim_suggestion['distance_saved_km']} km and {trim_suggestion['time_saved_hrs']} hrs",
+                                "order": trim_suggestion.get("suggested_order", []),
+                                "path": trim_suggestion.get("suggested_path", []),
+                                "arcs": trim_suggestion.get("suggested_arcs", []),
+                                "key": "opt_trim",
+                                "choice_label": f"Trimmed: removed {trim_suggestion['removed_city']}",
+                                "src_color": [198, 154, 71, 220],
+                                "tgt_color": [218, 115, 71, 235],
+                            }
 
-                            with st.expander("Map preview for the nearby replacement option", expanded=False):
-                                _render_route_map(
-                                    "Travel Map - Replacement Option",
-                                    top_swap.get("suggested_path", []),
-                                    top_swap.get("suggested_arcs", []),
-                                    [26, 123, 116, 220],
-                                    [244, 194, 96, 235],
-                                )
-                            if st.button(
-                                "Use Option 2 for itinerary",
-                                key="use_route_option_2",
-                                use_container_width=True,
-                            ):
-                                st.session_state["pending_route_plan_override"] = top_swap.get("suggested_order", [])
-                                st.session_state["route_choice_label"] = (
-                                    f"Option 2: swap {top_swap['replace_city']} with {top_swap['replacement_city']}"
-                                )
-                                st.session_state["route_autogenerate"] = True
-                                st.rerun()
+                        # Render: current map always shown; alternatives in tabs if present
+                        has_alts = alt_a or alt_b
+                        if has_alts:
+                            tab_labels = ["Your Route"]
+                            if alt_a:
+                                tab_labels.append(f"⇄ {alt_a['label']}")
+                            if alt_b:
+                                tab_labels.append(f"✨ {alt_b['label']}")
+                            route_tabs = st.tabs(tab_labels)
 
-                        if trim_suggestion:
-                            trim_meta = "".join([
-                                f"<div class='route-metric-pill'>Remove {trim_suggestion['removed_city']}</div>",
-                                f"<div class='route-metric-pill'>Save {trim_suggestion['distance_saved_km']} km</div>",
-                                f"<div class='route-metric-pill'>Save {trim_suggestion['time_saved_hrs']} hrs</div>",
-                                f"<div class='route-metric-pill'>{' -> '.join(trim_suggestion['suggested_order'])}</div>",
-                            ])
-                            st.markdown(f"""
-                            <div class="route-strategy-card replace">
-                              <div class="route-strategy-label">Option 3 - Trim One Stop</div>
-                              <div class="route-strategy-title">Drop the heaviest stop if you want the easiest route</div>
-                              <div class="route-strategy-copy">
-                                If burnout is the top concern, removing
-                                <strong>{trim_suggestion['removed_city']}</strong>
-                                creates a smoother trip without as much backtracking.
-                              </div>
-                              <div class="route-strategy-meta">{trim_meta}</div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                            with route_tabs[0]:
+                                _render_route_map("Current Route", vp, arcs, [218, 115, 71, 220], [26, 123, 116, 235])
+                                if st.button("▶️ Use your route as-is", key="use_current_route", use_container_width=True):
+                                    st.session_state["route_autogenerate"] = True
+                                    st.rerun()
 
-                            with st.expander("Map preview for the trimmed route", expanded=False):
-                                _render_route_map(
-                                    "Travel Map - Trimmed Route",
-                                    trim_suggestion.get("suggested_path", []),
-                                    trim_suggestion.get("suggested_arcs", []),
-                                    [198, 154, 71, 220],
-                                    [218, 115, 71, 235],
-                                )
-                            if st.button(
-                                "Use Option 3 for itinerary",
-                                key="use_route_option_3",
-                                use_container_width=True,
-                            ):
-                                st.session_state["pending_route_plan_override"] = trim_suggestion.get("suggested_order", [])
-                                st.session_state["route_choice_label"] = (
-                                    f"Option 3: trim {trim_suggestion['removed_city']}"
-                                )
-                                st.session_state["route_autogenerate"] = True
-                                st.rerun()
+                            tab_idx = 1
+                            for alt in [alt_a, alt_b]:
+                                if not alt:
+                                    continue
+                                with route_tabs[tab_idx]:
+                                    st.caption(alt["desc"])
+                                    _render_route_map(
+                                        alt["label"], alt["path"], alt["arcs"],
+                                        alt["src_color"], alt["tgt_color"]
+                                    )
+                                    if st.button(
+                                        f"✔️ Use this route",
+                                        key=f"use_{alt['key']}",
+                                        use_container_width=True,
+                                    ):
+                                        st.session_state["pending_route_plan_override"] = alt["order"]
+                                        st.session_state["route_choice_label"] = alt["choice_label"]
+                                        st.session_state["route_autogenerate"] = True
+                                        st.rerun()
+                                tab_idx += 1
+                        else:
+                            _render_route_map("Your Route", vp, arcs, [218, 115, 71, 220], [26, 123, 116, 235])
 
                         st.divider()
 
@@ -864,7 +783,7 @@ if page in ("planner", "weekend"):
                         interests=validated["interests"],
                         travel_style=travel_style,
                         route_analysis=route_analysis,
-                        hometown=hometown.strip() if is_weekend else prof.get("home_city", ""),
+                        hometown=hometown.strip() if is_weekend else start_city.strip(),
                         is_weekend_getaway=is_weekend,
                     )
 
@@ -901,7 +820,7 @@ if page in ("planner", "weekend"):
                         interests=validated["interests"],
                         travel_style=travel_style,
                         route_analysis=None,
-                        hometown=hometown.strip() if is_weekend else prof.get("home_city", ""),
+                        hometown=hometown.strip() if is_weekend else start_city.strip(),
                         is_weekend_getaway=is_weekend,
                     )
 
@@ -1096,6 +1015,78 @@ if page in ("planner", "weekend"):
                         f"<strong>₹{day_total:,}</strong></div>",
                         unsafe_allow_html=True,
                     )
+
+                # ── Book Travel & Hotels ─────────────────────────────────────
+                from datetime import date, timedelta
+                from src.utils.common.booking_links import hotel_links, get_booking_links
+                
+                # Calculate travel date (trip start + day number - 1)
+                day_num = day.get("day_number", 1)
+                travel_date = date.today() + timedelta(days=day_num - 1)
+                
+                # Extract current city from schedule or destination
+                current_city = inp["destination"].split(",")[0].strip()
+                if "," in inp["destination"]:
+                    cities_list = [c.strip() for c in inp["destination"].split(",")]
+                    if day_num <= len(cities_list):
+                        current_city = cities_list[day_num - 1]
+                
+                with st.expander("🎫 Book Travel & Hotels", expanded=False):
+                    st.markdown("#### 🏨 Hotels in " + current_city)
+                    checkin = travel_date
+                    checkout = travel_date + timedelta(days=1)
+                    h_links = hotel_links(current_city, checkin, checkout)
+                    
+                    h_cols = st.columns(len(h_links))
+                    for h_col, link in zip(h_cols, h_links):
+                        with h_col:
+                            st.markdown(
+                                f"<a href='{link['url']}' target='_blank' style='text-decoration:none'>"
+                                f"<div style='padding:0.8rem;border-radius:16px;background:rgba(255,251,246,0.9);"
+                                f"border:1px solid rgba(92,72,49,0.1);text-align:center;cursor:pointer;"
+                                f"transition:transform 0.2s;'>"
+                                f"<div style='font-size:1.8rem;margin-bottom:0.3rem'>{link['icon']}</div>"
+                                f"<div style='font-weight:700;color:var(--text);font-size:0.85rem'>{link['name']}</div>"
+                                f"</div></a>",
+                                unsafe_allow_html=True
+                            )
+                    
+                    # Transport to next city (if multi-city trip)
+                    if "," in inp["destination"] and day_num < len(cities_list):
+                        next_city = cities_list[day_num]
+                        st.markdown(f"#### 🚆 Travel to {next_city}")
+                        
+                        # Get distance for smart transport suggestions
+                        from src.utils.route.route_intelligence import get_city_coords, haversine_distance
+                        c1 = get_city_coords(current_city)
+                        c2 = get_city_coords(next_city)
+                        distance = haversine_distance(c1, c2) if c1 and c2 else 200
+                        
+                        t_links = get_booking_links(current_city, next_city, distance, travel_date + timedelta(days=1))
+                        
+                        # Show all available transport modes
+                        all_transport = []
+                        if t_links.get("flight"):
+                            all_transport.extend(t_links["flight"])
+                        if t_links.get("train"):
+                            all_transport.extend(t_links["train"])
+                        if t_links.get("bus"):
+                            all_transport.extend(t_links["bus"])
+                        
+                        if all_transport:
+                            t_cols = st.columns(min(len(all_transport), 4))
+                            for t_col, link in zip(t_cols, all_transport[:4]):
+                                with t_col:
+                                    st.markdown(
+                                        f"<a href='{link['url']}' target='_blank' style='text-decoration:none'>"
+                                        f"<div style='padding:0.8rem;border-radius:16px;background:rgba(255,251,246,0.9);"
+                                        f"border:1px solid rgba(92,72,49,0.1);text-align:center;cursor:pointer;"
+                                        f"transition:transform 0.2s;'>"
+                                        f"<div style='font-size:1.8rem;margin-bottom:0.3rem'>{link['icon']}</div>"
+                                        f"<div style='font-weight:700;color:var(--text);font-size:0.85rem'>{link['name']}</div>"
+                                        f"</div></a>",
+                                        unsafe_allow_html=True
+                                    )
 
         # ── Budget tab ────────────────────────────────────────────────────────
         with tabs[n]:
@@ -1397,7 +1388,8 @@ if page in ("planner", "weekend"):
 # PROFILE PAGE
 # ═════════════════════════════════════════════════════════════════════════════
 elif page == "profile":
-    from utils.db import get_liked_places, add_liked_place, delete_liked_place
+    from src.utils.database.db import get_liked_places, add_liked_place, delete_liked_place
+    from src.utils.common.metrics import get_user_stats
 
     st.markdown("""
     <div class="page-hero">
@@ -1408,6 +1400,21 @@ elif page == "profile":
 
     prof = get_profile(user["id"])
     liked = get_liked_places(user["id"])
+    user_stats = get_user_stats(user["id"])
+
+    # Display user statistics
+    st.markdown("### 📊 Your Travel Stats")
+    stat_cols = st.columns(4)
+    with stat_cols[0]:
+        st.metric("Itineraries Created", user_stats["total_itineraries"])
+    with stat_cols[1]:
+        st.metric("Days Planned", user_stats["total_days_planned"])
+    with stat_cols[2]:
+        st.metric("Destinations", user_stats["unique_destinations"])
+    with stat_cols[3]:
+        st.metric("Liked Places", user_stats["liked_places"])
+    
+    st.markdown("<br>", unsafe_allow_html=True)
 
     col_left, col_right = st.columns([1, 1], gap="large")
 
@@ -1641,7 +1648,7 @@ elif page == "history":
 # RECOMMENDATIONS PAGE
 # ═════════════════════════════════════════════════════════════════════════════
 elif page == "recs":
-    from utils.db import get_liked_places
+    from src.utils.database.db import get_liked_places
 
     st.markdown("""
     <div class="page-hero">
@@ -1691,6 +1698,19 @@ elif page == "recs":
         label_visibility="collapsed",
     )
 
+    location_filter_label = st.radio(
+        "Destination scope",
+        ["All Destinations", "🇮🇳 India Only", "🌍 International Only"],
+        horizontal=True,
+        key="recs_location_filter",
+    )
+    _filter_map = {
+        "All Destinations": "all",
+        "🇮🇳 India Only": "india",
+        "🌍 International Only": "international",
+    }
+    _location_filter = _filter_map[location_filter_label]
+
     def _normalize_recommendations(payload):
         if isinstance(payload, dict):
             if isinstance(payload.get("recommendations"), list):
@@ -1731,7 +1751,7 @@ elif page == "recs":
             else:
                 recs = []
     else:
-        recs = get_recommendations(prof, liked, context=rec_context)
+        recs = get_recommendations(prof, liked, context=rec_context, location_filter=_location_filter)
         st.session_state.ai_recs_cache = None
 
     if recs:
