@@ -51,7 +51,7 @@ def _load_credentials():
 
 
 def _redirect_uri():
-    return os.getenv("REDIRECT_URI", "http://localhost:8501")
+    return os.getenv("REDIRECT_URI", " https://wandr-itinerary-ai.onrender.com")
 
 
 def _build_auth_url(state: str) -> str:
