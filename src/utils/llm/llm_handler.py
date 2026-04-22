@@ -6,11 +6,20 @@ import json
 import re
 import time
 import logging
+from pathlib import Path
 from groq import Groq
 from dotenv import load_dotenv
-from utils.validation import validate_itinerary_response, ValidationError
+from src.utils.common.validation import validate_itinerary_response, ValidationError
 
-load_dotenv()
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_ENV_CANDIDATES = [
+    _PROJECT_ROOT / "config" / ".env",
+    _PROJECT_ROOT / ".env",
+]
+for _env_path in _ENV_CANDIDATES:
+    if _env_path.exists():
+        load_dotenv(dotenv_path=_env_path, override=False)
+        break
 logger = logging.getLogger(__name__)
 
 

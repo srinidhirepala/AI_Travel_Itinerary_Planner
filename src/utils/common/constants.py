@@ -20,6 +20,16 @@ ALL_INTERESTS = [
     "Nature",
     "Shopping",
     "Photography",
+    "Relax",
+    "Nightlife",
+    "History",
+    "Wildlife",
+    "Beaches",
+    "Trekking",
+    "Spiritual",
+    "Architecture",
+    "Art",
+    "Music",
 ]
 
 # Travel styles / paces

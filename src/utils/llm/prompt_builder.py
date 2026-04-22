@@ -110,7 +110,11 @@ def build_itinerary_prompt(
             f"{optimized_guidance}{replacement_guidance}{trim_guidance}"
         )
 
-    hometown_guidance = f"- Origin City: {hometown}\n" if hometown else ""
+    hometown_guidance = (
+        f"- Origin City: {hometown} (travel starts here)\n"
+        "- Do NOT allocate sightseeing blocks in the origin city unless it is explicitly listed in destination stops.\n"
+        if hometown else ""
+    )
     weekend_guidance = "- This is a weekend getaway: keep transit light and prioritize nearby/high-value experiences.\n" if is_weekend_getaway else ""
 
     prompt = f"""Create a detailed {days}-day travel itinerary for {destination}.
@@ -141,7 +145,12 @@ No preamble. No explanation. No markdown fences. Pure JSON only."""
     return prompt
 
 
-def build_recommendations_prompt(profile: dict, liked_places: list[dict], context: dict | None = None) -> str:
+def build_recommendations_prompt(
+    profile: dict,
+    liked_places: list[dict],
+    context: dict | None = None,
+    location_filter: str = "all",
+) -> str:
     """
     Build a prompt for AI to generate destination recommendations.
     Based on user profile and previously liked places.
@@ -155,6 +164,12 @@ def build_recommendations_prompt(profile: dict, liked_places: list[dict], contex
     mood = context.get("mood", "")
     time_window_type = context.get("time_window_type", "Days")
     time_window_value = context.get("time_window_value", "")
+    scope_map = {
+        "all": "Worldwide",
+        "india": "India only",
+        "international": "International only (exclude India)",
+    }
+    destination_scope = scope_map.get(location_filter, "Worldwide")
     
     interests_str = ", ".join(interests) if interests else "General sightseeing"
     liked_places_str = ", ".join([p.get("place_name", "") for p in liked_places]) if liked_places else "None yet"
@@ -184,6 +199,7 @@ def build_recommendations_prompt(profile: dict, liked_places: list[dict], contex
             context_block += f"- User Mood: {mood}\n"
         if time_window_value:
             context_block += f"- Available Time Window: {time_window_value} {time_window_type}\n"
+    scope_block = f"\nDESTINATION SCOPE:\n- {destination_scope}\n"
     
     prompt = f"""Based on the user's travel profile, recommend 5-6 unique and exciting travel destinations worldwide.
 
@@ -193,7 +209,7 @@ USER PROFILE:
 - Food Preference: {food_pref}
 - Daily Budget: ₹{budget}
 - Previously Liked: {liked_places_str}
-{context_block}
+{context_block}{scope_block}
 
 REQUIREMENTS:
 - Recommend destinations they haven't been to (if liked places are provided)
@@ -203,6 +219,8 @@ REQUIREMENTS:
 - Explain why each destination matches their profile
 - If current location is provided, add a short transport hint from there
 - Rank by match relevance (best matches first)
+- If Destination Scope is "India only", every recommendation must be in India
+- If Destination Scope is "International only (exclude India)", every recommendation must be outside India
 
 Respond ONLY with a JSON object exactly matching this schema:
 {json.dumps(schema, indent=2)}

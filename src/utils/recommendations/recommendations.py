@@ -48,9 +48,19 @@ MOOD_BOOST = {
 }
 
 
-def get_recommendations(profile: dict, liked_places: list[dict], n: int = 6, context: dict | None = None) -> list[dict]:
+def get_recommendations(profile: dict, liked_places: list[dict], n: int = 6, context: dict | None = None, location_filter: str = "all") -> list[dict]:
     """
     Return top-n destination recommendations with a reason string.
+    
+    Args:
+        profile: User profile dict
+        liked_places: List of liked places
+        n: Number of recommendations
+        context: Additional context (mood, location, time)
+        location_filter: "all", "india", or "international"
+    
+    Returns:
+        List of recommended destinations
     """
     user_interests = set(profile.get("interests") or [])
     travel_style   = profile.get("travel_style", "Explorer")
@@ -69,6 +79,12 @@ def get_recommendations(profile: dict, liked_places: list[dict], n: int = 6, con
     scored = []
     for dest in DESTINATIONS:
         if dest["name"].lower() in already_liked:
+            continue
+        
+        # Apply location filter
+        if location_filter == "india" and dest["country"] != "India":
+            continue
+        elif location_filter == "international" and dest["country"] == "India":
             continue
 
         dest_tags = set(dest["tags"])

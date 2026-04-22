@@ -4,31 +4,32 @@ Wandr — AI Travel Itinerary Planner
 import streamlit as st
 import os
 import html
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 from src.utils.common.styles import GLOBAL_CSS
 from src.utils.auth.auth import render_login, logout
-from src.utils.database.db import (init_db, save_itinerary, get_itineraries,
-                      get_itinerary_data, delete_itinerary,
-                      get_profile, save_profile)
+from src.utils.database.db import init_db, save_itinerary, get_profile
 from src.utils.llm.llm_handler import LLMHandler
 from src.utils.llm.prompt_builder import build_itinerary_prompt, build_recommendations_prompt
 from src.utils.recommendations.recommendations import get_recommendations
-from src.utils.route.route_intelligence import analyze_route
+from src.utils.route.route_intelligence import analyze_route, get_city_coords, haversine_distance
 from src.utils.recommendations.weekend_getaways import get_weekend_getaways
 from src.utils.common.cache import get_cached_route_analysis, get_cached_weekend_getaways, get_cache_stats
 from src.utils.common.validation import validate_trip_params, ValidationError
+from src.utils.common.budget_validator import check_budget_feasibility, format_budget_warning
 from src.utils.common.error_handler import ErrorHandler
 from src.utils.common.rate_limiter import itinerary_limiter
 from src.utils.common.constants import (
     FOOD_PREFERENCES,
+    FOOD_ICONS,
     ALL_INTERESTS,
-    TRAVEL_STYLES,
     MOOD_OPTIONS,
     DEFAULT_BUDGET,
     REQUIRED_ENV_VARS,
-    FOOD_ICONS,
 )
+from src.pages.profile import render_profile_page
+from src.pages.history import render_history_page
 
 NAV_ITEMS = [
     ("Plan a Trip", "planner"),
@@ -47,6 +48,87 @@ LEGACY_NAV_MAP = {
     "👤 Profile": "Profile",
 }
 
+PLANNER_DEMO_TRIPS = [
+    {
+        "key": "golden_triangle",
+        "title": "Golden Triangle Sprint",
+        "summary": "Delhi -> Agra -> Jaipur with a culture-heavy 4-day pace.",
+        "page_label": "Plan a Trip",
+        "start_city": "Delhi",
+        "stops": ["Agra", "Jaipur"],
+        "days": 4,
+        "budget": 3500,
+        "food_pref": "Vegetarian",
+        "interests": ["Culture", "Food", "Photography"],
+    },
+    {
+        "key": "south_escape",
+        "title": "Southern Scenic Loop",
+        "summary": "Bengaluru -> Mysore -> Coorg -> Ooty for a polished showcase route.",
+        "page_label": "Plan a Trip",
+        "start_city": "Bengaluru",
+        "stops": ["Mysore", "Coorg", "Ooty"],
+        "days": 5,
+        "budget": 4200,
+        "food_pref": "Both (Veg & Non-Veg)",
+        "interests": ["Nature", "Food", "Photography"],
+    },
+    {
+        "key": "east_culture",
+        "title": "Eastern Heritage Break",
+        "summary": "Kolkata -> Bhubaneswar -> Puri with a calmer budget-friendly pace.",
+        "page_label": "Plan a Trip",
+        "start_city": "Kolkata",
+        "stops": ["Bhubaneswar", "Puri"],
+        "days": 4,
+        "budget": 2600,
+        "food_pref": "Vegetarian",
+        "interests": ["Culture", "Relax", "Photography"],
+    },
+]
+
+WEEKEND_DEMO_TRIPS = [
+    {
+        "key": "hyd_weekend",
+        "title": "Hyderabad Nature Reset",
+        "summary": "A 2-day nearby escape tuned for greenery, views, and light travel.",
+        "page_label": "Weekend Getaway",
+        "home_city": "Hyderabad",
+        "days": 2,
+        "budget": 2500,
+        "food_pref": "Vegetarian",
+        "interests": ["Nature", "Adventure", "Photography"],
+    },
+    {
+        "key": "blr_weekend",
+        "title": "Bengaluru Sunrise Break",
+        "summary": "A weekend-ready preset built for hills, photos, and a smooth short haul.",
+        "page_label": "Weekend Getaway",
+        "home_city": "Bengaluru",
+        "days": 2,
+        "budget": 3000,
+        "food_pref": "Both (Veg & Non-Veg)",
+        "interests": ["Nature", "Adventure", "Photography"],
+    },
+    {
+        "key": "delhi_food_weekend",
+        "title": "Delhi Food Drive",
+        "summary": "A short getaway preset for food, comfort, and an easy demo flow.",
+        "page_label": "Weekend Getaway",
+        "home_city": "Delhi",
+        "days": 2,
+        "budget": 2200,
+        "food_pref": "Vegetarian",
+        "interests": ["Food", "Relax", "Culture"],
+    },
+]
+
+LANDING_DEMO_TRIPS = [
+    PLANNER_DEMO_TRIPS[0],
+    WEEKEND_DEMO_TRIPS[0],
+    PLANNER_DEMO_TRIPS[1],
+]
+
 # Load environment variables from the new config location, with legacy fallback.
 _ROOT_DIR = Path(__file__).resolve().parent
 _ENV_CANDIDATES = [
@@ -58,9 +140,187 @@ for _env_path in _ENV_CANDIDATES:
         load_dotenv(dotenv_path=_env_path, override=False)
         break
 
+
+def _build_ai_recommendation_cache_key(
+    user_id: str,
+    profile: dict,
+    liked_places: list[dict],
+    context: dict,
+    location_filter: str,
+) -> str:
+    """Build a stable cache key so AI recommendations match the current inputs."""
+    cache_payload = {
+        "user_id": user_id,
+        "profile": {
+            "interests": sorted(profile.get("interests", []) or []),
+            "travel_style": profile.get("travel_style", ""),
+            "food_pref": profile.get("food_pref", ""),
+            "budget_default": profile.get("budget_default", 0),
+        },
+        "liked_places": sorted(
+            (
+                (place.get("place_name", "").strip().lower(), place.get("country", "").strip().lower())
+                for place in liked_places
+            )
+        ),
+        "context": {
+            "current_location": str(context.get("current_location", "")).strip().lower(),
+            "mood": str(context.get("mood", "")).strip().lower(),
+            "time_window_type": str(context.get("time_window_type", "")).strip(),
+            "time_window_value": int(context.get("time_window_value", 0) or 0),
+        },
+        "location_filter": location_filter,
+    }
+    return json.dumps(cache_payload, sort_keys=True)
+
+
+def _filter_recommendations_by_scope(recommendations: list[dict], location_filter: str) -> list[dict]:
+    """Enforce the selected destination scope on normalized recommendation payloads."""
+    if location_filter == "all":
+        return recommendations
+
+    filtered = []
+    for rec in recommendations:
+        country = str(rec.get("country", "")).strip().lower()
+        is_india = country == "india"
+        if location_filter == "india" and is_india:
+            filtered.append(rec)
+        elif location_filter == "international" and country and not is_india:
+            filtered.append(rec)
+    return filtered
+
+
+def _reset_route_selection_state() -> None:
+    """Clear any route-choice state before loading a new demo or trip."""
+    st.session_state["route_autogenerate"] = False
+    st.session_state["route_choice_label"] = None
+    st.session_state["selected_route_order"] = None
+    st.session_state.pop("pending_route_plan_override", None)
+
+
+def _apply_demo_trip(demo: dict) -> None:
+    """Populate the planner or weekend form with a showcase-ready demo preset."""
+    st.session_state["nav_select"] = demo["page_label"]
+    st.session_state["itinerary"] = None
+    st.session_state["last_inputs"] = {}
+    st.session_state["food_pref_sel"] = demo["food_pref"]
+    st.session_state["interests_sel"] = demo["interests"]
+    st.session_state["viewing_itin_id"] = None
+    st.session_state.pop("prefill_dest", None)
+    _reset_route_selection_state()
+
+    if demo["page_label"] == "Plan a Trip":
+        stops = demo.get("stops", [])
+        previous_stop_count = int(st.session_state.get("dest_count", 1) or 1)
+        st.session_state["start_city"] = demo.get("start_city", "")
+        st.session_state["pl_days"] = demo.get("days", 3)
+        st.session_state["pl_budget"] = demo.get("budget", 2000)
+        st.session_state["dest_count"] = max(1, len(stops))
+        for idx, stop in enumerate(stops):
+            st.session_state[f"stop_{idx}"] = stop
+        for idx in range(len(stops), previous_stop_count):
+            stale_key = f"stop_{idx}"
+            if stale_key in st.session_state:
+                del st.session_state[stale_key]
+        st.session_state["wk_selected_getaway"] = None
+    else:
+        st.session_state["wk_hometown"] = demo.get("home_city", "")
+        st.session_state["wk_days"] = demo.get("days", 2)
+        st.session_state["wk_budget"] = demo.get("budget", 2000)
+        st.session_state["wk_selected_getaway"] = None
+
+
+def _render_demo_trip_cards(title: str, subtitle: str, demos: list[dict], button_key_prefix: str) -> None:
+    """Render compact demo starters that make the app easy to showcase live."""
+    st.markdown(f"#### {title}")
+    st.caption(subtitle)
+    demo_cols = st.columns(len(demos), gap="medium")
+    for col, demo in zip(demo_cols, demos):
+        route_text = (
+            f"{demo['start_city']} -> " + " -> ".join(demo.get("stops", []))
+            if demo["page_label"] == "Plan a Trip"
+            else f"From {demo['home_city']}"
+        )
+        with col:
+            st.markdown(
+                f"""
+                <div class="feature-block" style="min-height: 198px;">
+                  <div class="ftitle">{html.escape(demo['title'])}</div>
+                  <div class="fdesc" style="margin-top:0.5rem">{html.escape(demo['summary'])}</div>
+                  <div class="route-metric-pill" style="margin-top:0.9rem">{html.escape(route_text)}</div>
+                  <div class="fdesc" style="margin-top:0.65rem">
+                    {demo['days']} days · INR {demo['budget']:,}/day
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if st.button(
+                f"Load {demo['title']}",
+                key=f"{button_key_prefix}_{demo['key']}",
+                use_container_width=True,
+            ):
+                _apply_demo_trip(demo)
+                st.rerun()
+
+
+def _estimate_route_distance_km(cities: list[str]) -> float:
+    """Estimate route distance from ordered city stops using mapped coordinates."""
+    total_distance = 0.0
+    for idx in range(len(cities) - 1):
+        city_a = get_city_coords(cities[idx])
+        city_b = get_city_coords(cities[idx + 1])
+        if city_a and city_b:
+            total_distance += haversine_distance(city_a, city_b)
+    return total_distance
+
+
+def _render_budget_feasibility_gate(
+    validated: dict,
+    origin_city: str,
+    destination_cities: list[str],
+    checkbox_key: str,
+) -> bool:
+    """Render a budget feasibility card and gate generation when budget is too tight."""
+    budget_cities = destination_cities[:]
+    origin_city = origin_city.strip()
+    if origin_city and (
+        not budget_cities or budget_cities[0].lower() != origin_city.lower()
+    ):
+        budget_cities = [origin_city] + budget_cities
+
+    total_distance_km = _estimate_route_distance_km(budget_cities)
+    budget_ok, feasibility = check_budget_feasibility(
+        user_budget_per_day=validated["budget"],
+        days=validated["days"],
+        destination=validated["destination"],
+        cities=budget_cities,
+        total_distance_km=total_distance_km,
+        food_pref=validated["food_pref"],
+    )
+
+    st.markdown(format_budget_warning(feasibility), unsafe_allow_html=True)
+    if budget_ok:
+        return True
+
+    acknowledged = st.checkbox(
+        "I understand this trip is above the suggested budget and still want to continue.",
+        key=checkbox_key,
+    )
+    if not acknowledged:
+        st.info("Adjust the budget, shorten the trip, or confirm the checkbox above to continue.")
+    return acknowledged
+
+
 def _apply_planner_route_to_state(cities: list[str]) -> None:
     """Populate the planner widgets from a suggested route."""
     clean_cities = [city.strip() for city in cities if city and city.strip()]
+    if not clean_cities:
+        return
+
+    start_city = str(st.session_state.get("start_city", "") or "").strip().lower()
+    if start_city and clean_cities[0].lower() == start_city:
+        clean_cities = clean_cities[1:]
     if not clean_cities:
         return
 
@@ -174,7 +434,9 @@ st.set_page_config(
 )
 
 st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
-init_db()
+if "_db_initialized" not in st.session_state:
+    init_db()
+    st.session_state["_db_initialized"] = True
 _validate_startup_config()
 
 if not render_login():
@@ -196,6 +458,7 @@ for key, default in [
     ("wk_selected_getaway", None),
     ("route_autogenerate", False),
     ("route_choice_label", None),
+    ("selected_route_order", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -245,7 +508,6 @@ with top_center:
                 type="primary" if current_nav == label else "secondary",
             ):
                 st.session_state["nav_select"] = label
-                st.rerun()
 
 with top_right:
     pic = user.get("picture", "")
@@ -280,6 +542,12 @@ if page is None:
       <h1>Start with a vibe, leave with a plan worth taking</h1>
       <p>Build bold city breaks, quiet weekend escapes, and smarter itineraries from the header above whenever inspiration hits.</p>
     </div>""", unsafe_allow_html=True)
+    _render_demo_trip_cards(
+        "Showcase Starters",
+        "Load a polished sample flow instantly for demos, recordings, or evaluator walkthroughs.",
+        LANDING_DEMO_TRIPS,
+        "landing_demo",
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -301,6 +569,12 @@ if page in ("planner", "weekend"):
           <h3>Quick inputs for a shorter trip</h3>
           <p>Use this lighter form only for nearby weekend ideas.</p>
         </div>""", unsafe_allow_html=True)
+        _render_demo_trip_cards(
+            "Weekend Demo Starters",
+            "Use one click to load a short-haul showcase scenario with nearby getaway suggestions.",
+            WEEKEND_DEMO_TRIPS,
+            "weekend_demo",
+        )
     else:
         st.markdown("""
         <div class="page-hero hero-clean">
@@ -308,6 +582,12 @@ if page in ("planner", "weekend"):
           <h1>Shape a trip that feels exciting before it even begins</h1>
           <p>Map the route, tune the budget, match the food, and turn a list of places into a trip that flows naturally.</p>
         </div>""", unsafe_allow_html=True)
+        _render_demo_trip_cards(
+            "Trip Demo Starters",
+            "Load a presentation-ready multi-city scenario to show route intelligence, budget checks, and exports quickly.",
+            PLANNER_DEMO_TRIPS,
+            "planner_demo",
+        )
 
     if is_weekend:
         top_fields = st.columns([1.6, 0.8, 0.9], gap="medium")
@@ -520,10 +800,28 @@ if page in ("planner", "weekend"):
 
     if not is_weekend and st.session_state.get("route_choice_label"):
         st.info(f"Using {st.session_state['route_choice_label']} for itinerary generation.")
+        selected_preview = [
+            c.strip() for c in st.session_state.get("selected_route_order", []) if c and c.strip()
+        ]
+        start_norm_preview = start_city.strip().lower() if start_city else ""
+        if start_norm_preview and selected_preview and selected_preview[0].lower() == start_norm_preview:
+            selected_preview = selected_preview[1:]
+        if selected_preview:
+            st.caption("Locked route order for planning: " + " -> ".join(selected_preview))
 
     # ── Generate ──────────────────────────────────────────────────────────────
     if generate_btn:
         dest_to_use = (destination or "").strip()
+        if not is_weekend and st.session_state.get("selected_route_order"):
+            selected_order = [
+                c.strip() for c in st.session_state.get("selected_route_order", []) if c and c.strip()
+            ]
+            start_norm = start_city.strip().lower() if start_city else ""
+            if start_norm and selected_order and selected_order[0].lower() == start_norm:
+                selected_order = selected_order[1:]
+            if selected_order:
+                dest_to_use = ", ".join(selected_order)
+
         if is_weekend and not hometown.strip():
             st.error("Please enter your home city first.")
         elif not is_weekend and not start_city.strip():
@@ -564,40 +862,21 @@ if page in ("planner", "weekend"):
                     destination=dest_to_use, days=days, budget=budget,
                     food_pref=food_pref, interests=interests or [],
                 )
-                
+                cities = [c.strip() for c in dest_to_use.split(",") if c.strip()]
+                origin_city = hometown.strip() if is_weekend else start_city.strip()
+
+                status_text.info("Checking budget fit...")
+                if not _render_budget_feasibility_gate(
+                    validated,
+                    origin_city=origin_city,
+                    destination_cities=cities,
+                    checkbox_key="budget_override_weekend" if is_weekend else "budget_override_planner",
+                ):
+                    st.stop()
+
                 status_text.info("🗺️ Analyzing your route...")
 
-                # ── Budget feasibility check (planner only) ────────────────
-                if not is_weekend:
-                    from src.utils.common.budget_validator import check_budget_feasibility, format_budget_warning
-                    _cities_for_budget = [c.strip() for c in dest_to_use.split(",") if c.strip()]
-                    if start_city.strip() and (
-                        not _cities_for_budget or _cities_for_budget[0].lower() != start_city.strip().lower()
-                    ):
-                        _cities_for_budget = [start_city.strip()] + _cities_for_budget
-                    _dist_for_budget = 0
-                    if len(_cities_for_budget) > 1:
-                        from src.utils.route.route_intelligence import get_city_coords, haversine_distance
-                        for _i in range(len(_cities_for_budget) - 1):
-                            _c1 = get_city_coords(_cities_for_budget[_i])
-                            _c2 = get_city_coords(_cities_for_budget[_i + 1])
-                            if _c1 and _c2:
-                                _dist_for_budget += haversine_distance(_c1, _c2)
-                    _budget_ok, _budget_feasibility = check_budget_feasibility(
-                        user_budget_per_day=validated["budget"],
-                        days=validated["days"],
-                        destination=validated["destination"],
-                        cities=_cities_for_budget,
-                        total_distance_km=_dist_for_budget,
-                        food_pref=validated["food_pref"],
-                    )
-                    st.markdown(format_budget_warning(_budget_feasibility), unsafe_allow_html=True)
-                    if not _budget_ok:
-                        if not st.checkbox("I understand my budget is tight — proceed anyway", key="budget_override"):
-                            st.stop()
-
-                # ── Route analysis (all stops, bug fixed) ────────────────
-                cities = [c.strip() for c in dest_to_use.split(",") if c.strip()]
+                # Route analysis (all stops, bug fixed)
                 analysis_cities = cities
                 if not is_weekend and start_city.strip():
                     if not cities or cities[0].lower() != start_city.strip().lower():
@@ -743,6 +1022,7 @@ if page in ("planner", "weekend"):
                             with route_tabs[0]:
                                 _render_route_map("Current Route", vp, arcs, [218, 115, 71, 220], [26, 123, 116, 235])
                                 if st.button("▶️ Use your route as-is", key="use_current_route", use_container_width=True):
+                                    st.session_state["selected_route_order"] = None
                                     st.session_state["route_autogenerate"] = True
                                     st.rerun()
 
@@ -762,6 +1042,7 @@ if page in ("planner", "weekend"):
                                         use_container_width=True,
                                     ):
                                         st.session_state["pending_route_plan_override"] = alt["order"]
+                                        st.session_state["selected_route_order"] = alt["order"]
                                         st.session_state["route_choice_label"] = alt["choice_label"]
                                         st.session_state["route_autogenerate"] = True
                                         st.rerun()
@@ -803,6 +1084,9 @@ if page in ("planner", "weekend"):
                         interests=validated["interests"],
                         data=result,
                     )
+
+                    st.session_state["selected_route_order"] = None
+                    st.session_state["route_choice_label"] = None
                     
                     status_text.empty()
                     st.success("✅ Itinerary ready — saved to your history!")
@@ -839,6 +1123,9 @@ if page in ("planner", "weekend"):
                         interests=validated["interests"],
                         data=result,
                     )
+
+                    st.session_state["selected_route_order"] = None
+                    st.session_state["route_choice_label"] = None
 
                     status_text.empty()
                     st.success("✅ Itinerary ready — saved to your history!")
@@ -1388,260 +1675,14 @@ if page in ("planner", "weekend"):
 # PROFILE PAGE
 # ═════════════════════════════════════════════════════════════════════════════
 elif page == "profile":
-    from src.utils.database.db import get_liked_places, add_liked_place, delete_liked_place
-    from src.utils.common.metrics import get_user_stats
-
-    st.markdown("""
-    <div class="page-hero">
-      <div class="eyebrow">✦ Account</div>
-      <h1>Your Profile</h1>
-      <p>Preferences saved here pre-fill every itinerary and personalise your recommendations.</p>
-    </div>""", unsafe_allow_html=True)
-
-    prof = get_profile(user["id"])
-    liked = get_liked_places(user["id"])
-    user_stats = get_user_stats(user["id"])
-
-    # Display user statistics
-    st.markdown("### 📊 Your Travel Stats")
-    stat_cols = st.columns(4)
-    with stat_cols[0]:
-        st.metric("Itineraries Created", user_stats["total_itineraries"])
-    with stat_cols[1]:
-        st.metric("Days Planned", user_stats["total_days_planned"])
-    with stat_cols[2]:
-        st.metric("Destinations", user_stats["unique_destinations"])
-    with stat_cols[3]:
-        st.metric("Liked Places", user_stats["liked_places"])
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    col_left, col_right = st.columns([1, 1], gap="large")
-
-    with col_left:
-        st.markdown("#### Travel Preferences")
-        with st.form("profile_form"):
-            current_food = prof.get("food_pref", "Vegetarian")
-            food_idx = FOOD_PREFERENCES.index(current_food) if current_food in FOOD_PREFERENCES else 0
-            new_food = st.selectbox("🍽️ Default food preference", FOOD_PREFERENCES, index=food_idx)
-
-            new_interests = st.multiselect(
-                "🎯 Interests",
-                ALL_INTERESTS,
-                default=[i for i in prof.get("interests", []) if i in ALL_INTERESTS],
-            )
-
-            new_home = st.text_input(
-                "🏠 Home city (for Weekend Getaway)",
-                value=prof.get("home_city", ""),
-                placeholder="e.g. Hyderabad",
-            )
-
-            new_style = st.selectbox(
-                "🧳 Travel style", TRAVEL_STYLES,
-                index=TRAVEL_STYLES.index(prof.get("travel_style", "Explorer"))
-                if prof.get("travel_style", "Explorer") in TRAVEL_STYLES else 0,
-            )
-
-            new_budget = st.number_input(
-                "💰 Default daily budget (₹)",
-                min_value=500, max_value=50000,
-                value=prof.get("budget_default", 2000), step=500,
-            )
-
-            if st.form_submit_button("💾 Save Preferences", use_container_width=True):
-                save_profile(user["id"], new_food, new_interests, new_home, new_style, new_budget)
-                st.success("✅ Preferences saved! They'll apply to your next itinerary.")
-                st.rerun()
-
-    with col_right:
-        st.markdown("#### Liked Places")
-        if liked:
-            for place in liked:
-                pcol1, pcol2 = st.columns([5, 1])
-                with pcol1:
-                    icon = "🏙️" if place.get("place_type") == "city" else "📍"
-                    st.markdown(f"""
-                    <div class="place-pill">
-                      {icon} <strong>{place['place_name']}</strong>
-                      &nbsp;<span style='color:var(--muted)'>{place.get('country', '')}</span>
-                    </div>""", unsafe_allow_html=True)
-                with pcol2:
-                    if st.button("✕", key=f"del_{place['id']}", help="Remove"):
-                        delete_liked_place(place["id"])
-                        st.rerun()
-        else:
-            st.markdown("<p style='color:var(--muted);font-size:0.9rem'>No liked places yet.</p>",
-                        unsafe_allow_html=True)
-
-        with st.expander("Add a place"):
-            with st.form("add_place"):
-                st.markdown("**Place name**")
-                p_name = st.text_input(
-                    "Place name",
-                    placeholder="Jaipur or Hampi",
-                    label_visibility="collapsed",
-                )
-                st.markdown("**Type**")
-                p_type = st.selectbox(
-                    "Type",
-                    ["city", "attraction", "restaurant"],
-                    label_visibility="collapsed",
-                )
-                st.markdown("**Country**")
-                p_country = st.text_input(
-                    "Country",
-                    placeholder="India",
-                    label_visibility="collapsed",
-                )
-                st.markdown("**Notes**")
-                p_notes = st.text_area(
-                    "Notes (optional)",
-                    height=60,
-                    label_visibility="collapsed",
-                    placeholder="Why do you like this place?",
-                )
-                if st.form_submit_button("Add", use_container_width=True):
-                    if p_name:
-                        add_liked_place(user["id"], p_name, p_type, p_country, p_notes)
-                        st.success(f"Added {p_name}!")
-                        st.rerun()
+    render_profile_page(user)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # HISTORY PAGE
 # ═════════════════════════════════════════════════════════════════════════════
 elif page == "history":
-    st.markdown("""
-    <div class="page-hero">
-      <div class="eyebrow">✦ Saved Plans</div>
-      <h1>My Itineraries</h1>
-      <p>Every trip you've planned, saved automatically with your food preferences.</p>
-    </div>""", unsafe_allow_html=True)
-
-    itins = get_itineraries(user["id"])  # Returns in reverse chronological order (newest first)
-
-    if not itins:
-        st.markdown("""
-        <div style='text-align:center;padding:3rem 0'>
-          <div style='font-size:3rem'>📭</div>
-          <p style='font-family:var(--serif);font-size:1.3rem;margin:0.5rem 0;color:var(--text)'>
-            No itineraries yet
-          </p>
-          <p style='color:var(--muted)'>Plan a trip and it'll appear here automatically.</p>
-        </div>""", unsafe_allow_html=True)
-
-    elif st.session_state.viewing_itin_id:
-        itin_data = get_itinerary_data(st.session_state.viewing_itin_id)
-        current_meta = next((i for i in itins if i["id"] == st.session_state.viewing_itin_id), None)
-
-        if st.button("← Back to all itineraries"):
-            st.session_state.viewing_itin_id = None
-            st.rerun()
-
-        if itin_data and current_meta:
-            food_saved = current_meta.get("food_pref", "—")
-            st.markdown(f"### {current_meta['destination']} — {current_meta['days']} days")
-            st.markdown(
-                f"<p style='color:var(--muted)'>{current_meta['created_at'][:10]} &nbsp;·&nbsp; "
-                f"{food_saved} &nbsp;·&nbsp; ₹{current_meta['budget']:,}/day</p>",
-                unsafe_allow_html=True,
-            )
-
-            itin_days = itin_data.get("days", [])
-            n = len(itin_days)
-            tabs = st.tabs([f"Day {d['day_number']}" for d in itin_days] + ["💰 Budget"])
-
-            for idx, day in enumerate(itin_days):
-                with tabs[idx]:
-                    st.markdown(f"### {day.get('title', '')}")
-
-                    food_highlights = day.get("food_highlights", [])
-                    if food_highlights:
-                        st.markdown(
-                            f'<div class="food-highlight-bar">🍴 {" · ".join(food_highlights[:3])}</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                    for item in day.get("schedule", []):
-                        cost = f"₹{item['cost_inr']}" if item.get("cost_inr", 0) > 0 else "Free"
-                        food_html = (
-                            f"<div class='meta'>🍴 {item['food_item']}</div>"
-                            if item.get("food_item") else ""
-                        )
-                        st.markdown(f"""
-                        <div class="activity-card">
-                          <div class="time">{item.get('time', '')}</div>
-                          <div class="act">{item.get('activity', '')}</div>
-                          <div class="meta">📍 {item.get('location', '')} · {cost}</div>
-                          {food_html}
-                          <div class="meta" style="color:#7880a0">{item.get('notes', '')}</div>
-                        </div>""", unsafe_allow_html=True)
-
-                    meals = day.get("meals", {})
-                    if meals:
-                        st.markdown(
-                            '<div class="section-header"><span>Meals</span><div class="line"></div></div>',
-                            unsafe_allow_html=True,
-                        )
-                        mc1, mc2, mc3 = st.columns(3)
-                        for col, (label, icon, key) in zip(
-                            [mc1, mc2, mc3],
-                            [("Breakfast", "🌅", "breakfast"),
-                             ("Lunch", "☀️", "lunch"),
-                             ("Dinner", "🌙", "dinner")],
-                        ):
-                            m = meals.get(key, {})
-                            with col:
-                                st.markdown(f"""
-                                <div class="meal-card">
-                                  <div class="meal-label">{icon} {label}</div>
-                                  <div class="place">{m.get('place', '—')}</div>
-                                  <div class="dish">{m.get('dish', '')}</div>
-                                  <div class="cost">₹{m.get('cost_inr', '—')}</div>
-                                </div>""", unsafe_allow_html=True)
-
-            with tabs[n]:
-                bd = itin_data.get("budget_breakdown", {})
-                if bd:
-                    for k, v in bd.items():
-                        cls = "budget-row total" if k == "grand_total" else "budget-row"
-                        if v:
-                            st.markdown(
-                                f'<div class="{cls}"><span class="blabel">'
-                                f'{k.replace("_", " ").title()}</span>'
-                                f'<span class="bval">₹{v:,}</span></div>',
-                                unsafe_allow_html=True,
-                            )
-
-    else:
-        # List view - displayed in reverse chronological order (newest first)
-        if itins:
-            st.markdown("""
-            <div style='color: #7a6f69; font-size: 0.9rem; margin-bottom: 1.5rem;'>
-            ⏱️ <strong>Newest itineraries first</strong> — Click any to view full details
-            </div>""", unsafe_allow_html=True)
-            
-        for idx, itin in enumerate(itins):
-            food_saved = itin.get("food_pref", "—")
-            food_icon = {"Vegetarian": "🟢", "Non-Vegetarian": "🔴",
-                         "Both (Veg & Non-Veg)": "🔵", "Vegan": "🌿",
-                         "Jain": "🕊️", "Halal": "☪️"}.get(food_saved, "🍽️")
-
-            c1, c2 = st.columns([6, 1])
-            with c1:
-                label = (
-                    f"📍 {itin['destination']} · {itin['days']} days · "
-                    f"₹{itin['budget']:,}/day · {food_icon} {food_saved} · "
-                    f"{itin['created_at'][:10]}"
-                )
-                if st.button(label, key=f"view_{itin['id']}", use_container_width=True):
-                    st.session_state.viewing_itin_id = itin["id"]
-                    st.rerun()
-            with c2:
-                if st.button("🗑️", key=f"del_{itin['id']}", help="Delete"):
-                    delete_itinerary(itin["id"])
-                    st.rerun()
+    render_history_page(user)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1735,19 +1776,48 @@ elif page == "recs":
         return []
 
     if "🤖" in rec_mode:
-        if st.session_state.ai_recs_cache:
-            recs = _normalize_recommendations(st.session_state.ai_recs_cache)
+        ai_cache_key = _build_ai_recommendation_cache_key(
+            user["id"],
+            prof,
+            liked,
+            rec_context,
+            _location_filter,
+        )
+        ai_cache_entry = st.session_state.get("ai_recs_cache")
+
+        if (
+            isinstance(ai_cache_entry, dict)
+            and ai_cache_entry.get("key") == ai_cache_key
+            and isinstance(ai_cache_entry.get("results"), list)
+        ):
+            recs = _filter_recommendations_by_scope(ai_cache_entry["results"], _location_filter)
         else:
             if st.button("✨ Generate AI Recommendations", type="primary"):
                 with st.spinner("Generating personalized recommendations…"):
                     try:
-                        prompt = build_recommendations_prompt(prof, liked, rec_context)
+                        prompt = build_recommendations_prompt(
+                            prof,
+                            liked,
+                            rec_context,
+                            location_filter=_location_filter,
+                        )
                         raw_recs = LLMHandler().generate_recommendations(prompt)
-                        recs = _normalize_recommendations(raw_recs)
-                        st.session_state.ai_recs_cache = recs
+                        recs = _filter_recommendations_by_scope(
+                            _normalize_recommendations(raw_recs),
+                            _location_filter,
+                        )
+                        st.session_state.ai_recs_cache = {
+                            "key": ai_cache_key,
+                            "results": recs,
+                        }
                     except Exception as e:
                         ErrorHandler.handle_api_error(e)
-                        recs = get_recommendations(prof, liked, context=rec_context)
+                        recs = get_recommendations(
+                            prof,
+                            liked,
+                            context=rec_context,
+                            location_filter=_location_filter,
+                        )
             else:
                 recs = []
     else:

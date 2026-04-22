@@ -5,9 +5,28 @@ distance plus interest match. If a city does not have a hand-curated set yet,
 the module falls back to a broader nearby-discovery catalog.
 """
 
+import os
+from pathlib import Path
 from typing import Dict, List
 
-from utils.route_intelligence import get_city_coords, haversine_distance
+import requests
+from dotenv import load_dotenv
+
+from src.utils.route.route_intelligence import get_city_coords, haversine_distance
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_ENV_CANDIDATES = [
+    _PROJECT_ROOT / "config" / ".env",
+    _PROJECT_ROOT / ".env",
+]
+
+
+def _reload_env() -> None:
+    for env_path in _ENV_CANDIDATES:
+        if env_path.exists():
+            load_dotenv(dotenv_path=env_path, override=True)
+            break
 
 
 CITY_ALIASES = {
@@ -23,6 +42,16 @@ CITY_ALIASES = {
     "cochin": "kochi",
     "trivandrum": "thiruvananthapuram",
     "pondy": "pondicherry",
+}
+
+# Hardcoded weekend packs should be used only for major metro cities.
+METRO_CITIES = {
+    "delhi",
+    "mumbai",
+    "chennai",
+    "bengaluru",
+    "hyderabad",
+    "kolkata",
 }
 
 
@@ -123,6 +152,148 @@ DISCOVERY_GETAWAYS = [
 ]
 
 
+_GEOAPIFY_URL = "https://api.geoapify.com/v2/places"
+_DEFAULT_GEOAPIFY_CATEGORIES = [
+    "tourism.attraction",
+    "tourism.sights",
+    "leisure.park",
+    "natural",
+    "beach",
+    "religion",
+    "entertainment.culture",
+    "entertainment.museum",
+    "sport",
+    "populated_place.city",
+    "populated_place.town",
+    "populated_place.village",
+]
+
+_INTEREST_TO_GEOAPIFY = {
+    "Culture": ["tourism.attraction", "tourism.sights", "religion", "entertainment.culture"],
+    "Photography": ["tourism.attraction", "tourism.sights", "natural", "beach"],
+    "Nature": ["natural", "leisure.park", "beach"],
+    "Adventure": ["sport", "natural", "entertainment.activity_park"],
+    "Food": ["catering.restaurant"],
+    "Shopping": ["commercial.marketplace"],
+    "Relax": ["leisure.park", "natural", "beach"],
+    "Spiritual": ["religion"],
+    "Beaches": ["natural"],
+    "Nightlife": ["adult.nightclub", "entertainment"],
+}
+
+_MIN_WEEKEND_DISTANCE_KM = 0
+
+
+def _geoapify_categories_for_interests(interests: list[str] | None) -> str:
+    categories = list(_DEFAULT_GEOAPIFY_CATEGORIES)
+    for interest in interests or []:
+        categories.extend(_INTEREST_TO_GEOAPIFY.get(interest, []))
+    # Deduplicate while preserving order
+    deduped = list(dict.fromkeys(categories))
+    return ",".join(deduped)
+
+
+def _tags_from_geoapify_categories(categories: list[str]) -> list[str]:
+    joined = " ".join(categories).lower()
+    tags = []
+    if "natural" in joined or "park" in joined:
+        tags.append("Nature")
+    if "tourism" in joined or "sights" in joined or "religion" in joined:
+        tags.append("Culture")
+    if "sport" in joined:
+        tags.append("Adventure")
+    if "restaurant" in joined or "catering" in joined:
+        tags.append("Food")
+    if "marketplace" in joined or "commercial" in joined:
+        tags.append("Shopping")
+    if "entertainment" in joined:
+        tags.append("Nightlife")
+    if not tags:
+        tags = ["Culture", "Nature"]
+    return tags
+
+
+def _discover_geoapify_getaways(home_city: str, interests: list[str] | None = None, limit: int = 4) -> list[dict]:
+    _reload_env()
+    api_key = os.getenv("GEOAPIFY_API_KEY", "").strip()
+    if not api_key:
+        return []
+
+    home_coords = get_city_coords(home_city)
+    if not home_coords:
+        return []
+
+    lat, lon = home_coords
+    params = {
+        "categories": _geoapify_categories_for_interests(interests),
+        "filter": f"circle:{lon},{lat},220000",
+        "bias": f"proximity:{lon},{lat}",
+        "limit": 40,
+        "apiKey": api_key,
+    }
+
+    try:
+        response = requests.get(_GEOAPIFY_URL, params=params, timeout=8)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return []
+
+    features = payload.get("features", []) if isinstance(payload, dict) else []
+    if not isinstance(features, list):
+        return []
+
+    ranked = []
+    seen = set()
+    for feature in features:
+        properties = feature.get("properties", {}) if isinstance(feature, dict) else {}
+        name = (properties.get("name") or "").strip()
+        if not name:
+            continue
+
+        key = name.lower()
+        if key in seen:
+            continue
+
+        place_lat = properties.get("lat")
+        place_lon = properties.get("lon")
+        if place_lat is None or place_lon is None:
+            continue
+
+        distance_km = int(round(haversine_distance(home_coords, (float(place_lat), float(place_lon)))))
+        if distance_km < _MIN_WEEKEND_DISTANCE_KM or distance_km > 220:
+            continue
+
+        categories = properties.get("categories") or []
+        tags = _tags_from_geoapify_categories(categories if isinstance(categories, list) else [])
+        vibe = tags[0] + " escape"
+        reason = f"Auto-discovered nearby {tags[0].lower()} spot with weekend-friendly travel distance."
+
+        scored = _score_option(
+            {
+                "name": name,
+                "distance_km": distance_km,
+                "tags": tags,
+                "vibe": vibe,
+                "reason": reason,
+            },
+            interests,
+            distance_km=distance_km,
+        )
+        ranked.append(scored)
+        seen.add(key)
+
+    ranked.sort(
+        key=lambda item: (
+            item["score"],
+            -abs(item["distance_km"] - 65),
+            -item["distance_km"],
+        ),
+        reverse=True,
+    )
+    return ranked[:limit]
+
+
 def _normalize_city(city: str) -> str:
     cleaned = city.strip().lower()
     return CITY_ALIASES.get(cleaned, cleaned)
@@ -159,7 +330,7 @@ def _discover_nearby_getaways(home_city: str, interests: list[str] | None = None
     ranked = []
     for option in DISCOVERY_GETAWAYS:
         distance_km = int(round(haversine_distance(home_coords, option["coordinates"])))
-        if distance_km < 25 or distance_km > 220:
+        if distance_km < _MIN_WEEKEND_DISTANCE_KM or distance_km > 220:
             continue
 
         ranked.append(_score_option(option, interests, distance_km=distance_km))
@@ -189,7 +360,6 @@ def _discover_nearby_getaways(home_city: str, interests: list[str] | None = None
 def get_weekend_getaways(home_city: str, interests: list[str] | None = None, limit: int = 4) -> list[dict]:
     city_key = _normalize_city(home_city)
     options = WEEKEND_GETAWAYS.get(city_key, [])
-
     if options:
         ranked = [_score_option(option, interests) for option in options]
         ranked.sort(
@@ -198,4 +368,8 @@ def get_weekend_getaways(home_city: str, interests: list[str] | None = None, lim
         )
         return ranked[:limit]
 
-    return _discover_nearby_getaways(city_key, interests, limit=limit)
+    dynamic_options = _discover_geoapify_getaways(home_city, interests, limit)
+    if dynamic_options:
+        return dynamic_options[:limit]
+
+    return _discover_nearby_getaways(home_city, interests, limit)

@@ -1,6 +1,7 @@
 """
 Input and schema validation with Pydantic.
 """
+import re
 from typing import Any
 import logging
 import json
@@ -9,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MAX_DESTINATION_LENGTH = 100
-MAX_INTERESTS = 6
+MAX_INTERESTS = 16
 MAX_BUDGET = 100000
 MIN_BUDGET = 100
 MAX_DAYS = 30
@@ -21,6 +22,23 @@ class ValidationError(Exception):
     pass
 
 
+def sanitize_city_name(city: str) -> str:
+    """Sanitize city name to prevent injection attacks."""
+    if not city or not isinstance(city, str):
+        raise ValidationError("City name must be a non-empty string")
+    
+    # Remove special characters except spaces, hyphens, apostrophes, commas
+    sanitized = re.sub(r"[^a-zA-Z0-9\s\-',]", "", city.strip())
+    
+    if not sanitized:
+        raise ValidationError("City name contains only invalid characters")
+    
+    if len(sanitized) > 100:
+        raise ValidationError("City name too long (max 100 characters)")
+    
+    return sanitized
+
+
 def validate_destination(destination: str) -> str:
     """Validate and sanitize destination input."""
     if not destination:
@@ -28,14 +46,13 @@ def validate_destination(destination: str) -> str:
     
     destination = destination.strip()
     
+    # Sanitize the entire destination string
+    destination = sanitize_city_name(destination)
+    
     if len(destination) > MAX_DESTINATION_LENGTH:
         raise ValidationError(
             f"Destination name too long. Max {MAX_DESTINATION_LENGTH} characters."
         )
-    
-    # Basic sanitization - prevent injection
-    if any(char in destination for char in ["<", ">", "{", "}", ";"]):
-        raise ValidationError("Destination contains invalid characters")
     
     return destination
 
@@ -70,13 +87,13 @@ def validate_trip_params(
         errors.append(f"Food preference must be one of: {', '.join(valid_food_prefs)}")
     
     # Interests validation
-    valid_interests = ["Culture", "Food", "Adventure", "Nature", "Shopping", "Photography"]
+    from src.utils.common.constants import ALL_INTERESTS
     if not isinstance(interests, list) or len(interests) == 0:
         errors.append("At least one interest must be selected")
     elif len(interests) > MAX_INTERESTS:
         errors.append(f"Maximum {MAX_INTERESTS} interests allowed")
     else:
-        invalid = set(interests) - set(valid_interests)
+        invalid = set(interests) - set(ALL_INTERESTS)
         if invalid:
             errors.append(f"Invalid interests: {', '.join(invalid)}")
     

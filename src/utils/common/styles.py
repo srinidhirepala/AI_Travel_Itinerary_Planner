@@ -5,6 +5,7 @@ an editorial travel-product feel.
 """
 
 GLOBAL_CSS = """
+<!-- UI v2.1 - Glassmorphism + Animations -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700;800&display=swap');
 
@@ -30,6 +31,7 @@ GLOBAL_CSS = """
     --gradient-primary: linear-gradient(135deg, #e36b46 0%, #f09545 48%, #ffd166 100%);
     --gradient-secondary: linear-gradient(135deg, rgba(15, 139, 128, 0.2), rgba(227, 107, 70, 0.16));
     --gradient-tertiary: linear-gradient(135deg, rgba(79, 115, 239, 0.2), rgba(209, 82, 141, 0.16));
+    --gradient-animated: linear-gradient(135deg, #e36b46, #f09545, #0f8b80, #4f73ef, #d1528d);
     --serif: 'Fraunces', serif;
     --font-serif: 'Fraunces', serif;
     --font-sans: 'Manrope', sans-serif;
@@ -39,6 +41,7 @@ GLOBAL_CSS = """
     --shadow-sm: 0 10px 24px rgba(87, 63, 38, 0.08);
     --shadow-md: 0 18px 42px rgba(87, 63, 38, 0.12);
     --shadow-lg: 0 28px 60px rgba(87, 63, 38, 0.18);
+    --shadow-glow: 0 8px 32px rgba(227, 107, 70, 0.15);
 }
 
 html,
@@ -144,6 +147,12 @@ section[data-testid="stSidebar"] {
     font-size: 1.35rem;
     font-weight: 700;
     box-shadow: 0 16px 30px rgba(218, 115, 71, 0.22);
+    animation: float 3s ease-in-out infinite;
+}
+
+@keyframes float {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-6px); }
 }
 
 .brand-name {
@@ -315,7 +324,29 @@ textarea:focus,
     border-radius: 16px !important;
     font-weight: 800 !important;
     padding: 0.78rem 1rem !important;
-    transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease !important;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    position: relative;
+    overflow: hidden;
+}
+
+.stButton > button::before,
+[data-testid="stDownloadButton"] button::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0;
+    height: 0;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.3);
+    transform: translate(-50%, -50%);
+    transition: width 0.6s, height 0.6s;
+}
+
+.stButton > button:hover::before,
+[data-testid="stDownloadButton"] button:hover::before {
+    width: 300px;
+    height: 300px;
 }
 
 .stButton > button[kind="primary"],
@@ -336,9 +367,9 @@ textarea:focus,
 
 .stButton > button:hover,
 [data-testid="stDownloadButton"] button:hover {
-    transform: translateY(-1px) !important;
-    box-shadow: 0 18px 34px rgba(218, 115, 71, 0.24) !important;
-    filter: saturate(1.04);
+    transform: translateY(-2px) scale(1.02) !important;
+    box-shadow: 0 20px 40px rgba(218, 115, 71, 0.28), var(--shadow-glow) !important;
+    filter: saturate(1.08) brightness(1.05);
 }
 
 .stButton > button[kind="secondary"]:hover {
@@ -411,6 +442,15 @@ textarea:focus,
         linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 249, 241, 0.88)) !important;
     border: 1px solid rgba(92, 72, 49, 0.1) !important;
     box-shadow: var(--shadow-sm) !important;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    transition: all 0.3s ease !important;
+}
+
+[data-testid="stMetric"]:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-md), var(--shadow-glow) !important;
+    border-color: rgba(227, 107, 70, 0.18) !important;
 }
 
 [data-testid="stMetricLabel"] {
@@ -443,6 +483,14 @@ textarea:focus,
         linear-gradient(135deg, rgba(255, 252, 247, 0.94), rgba(248, 239, 226, 0.88));
     border: 1px solid rgba(92, 72, 49, 0.1);
     box-shadow: var(--shadow-md);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    animation: heroGlow 8s ease-in-out infinite;
+}
+
+@keyframes heroGlow {
+    0%, 100% { box-shadow: var(--shadow-md), 0 0 40px rgba(227, 107, 70, 0.1); }
+    50% { box-shadow: var(--shadow-md), 0 0 60px rgba(15, 139, 128, 0.15); }
 }
 
 .page-hero::before,
@@ -608,6 +656,26 @@ textarea:focus,
         linear-gradient(135deg, rgba(255, 250, 244, 0.92), rgba(255, 244, 229, 0.92));
     border: 1px solid rgba(92, 72, 49, 0.1);
     box-shadow: var(--shadow-sm);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    position: relative;
+    overflow: hidden;
+}
+
+.summary-banner::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+    animation: shimmer 3s infinite;
+}
+
+@keyframes shimmer {
+    0% { left: -100%; }
+    100% { left: 100%; }
 }
 
 .summary-label {
@@ -791,6 +859,20 @@ textarea:focus,
     padding: 1.15rem 1.1rem !important;
     margin-bottom: 1rem !important;
     box-shadow: var(--shadow-sm) !important;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    cursor: pointer;
+}
+
+.activity-card:hover,
+.meal-card:hover,
+.rec-card:hover,
+.getaway-card:hover,
+.feature-block:hover {
+    transform: translateY(-4px) scale(1.01);
+    box-shadow: var(--shadow-md), var(--shadow-glow) !important;
+    border-color: rgba(227, 107, 70, 0.2) !important;
 }
 
 .activity-card::before,
@@ -805,6 +887,13 @@ textarea:focus,
     top: 0;
     height: 4px;
     background: linear-gradient(90deg, var(--accent-primary), var(--accent3), var(--accent2), var(--accent4), var(--accent5));
+    background-size: 200% 100%;
+    animation: gradientShift 6s ease infinite;
+}
+
+@keyframes gradientShift {
+    0%, 100% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
 }
 
 .activity-card::after,
@@ -851,6 +940,26 @@ textarea:focus,
     min-height: 188px;
     background:
         linear-gradient(180deg, rgba(255, 252, 248, 0.98), rgba(245, 252, 250, 0.92)) !important;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+
+.meal-card .cost {
+    display: inline-flex;
+    margin-top: 0.9rem;
+    padding: 0.35rem 0.65rem;
+    border-radius: 999px;
+    background: linear-gradient(135deg, rgba(218, 115, 71, 0.12), rgba(244, 194, 96, 0.1));
+    color: var(--accent-primary);
+    font-size: 0.84rem;
+    font-weight: 800;
+    box-shadow: 0 4px 12px rgba(218, 115, 71, 0.1);
+    animation: pulse 3s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
 }
 
 .meal-label {
@@ -873,17 +982,6 @@ textarea:focus,
     margin-top: 0.35rem;
     color: var(--muted);
     font-weight: 600;
-}
-
-.meal-card .cost {
-    display: inline-flex;
-    margin-top: 0.9rem;
-    padding: 0.35rem 0.65rem;
-    border-radius: 999px;
-    background: rgba(218, 115, 71, 0.1);
-    color: var(--accent-primary);
-    font-size: 0.84rem;
-    font-weight: 800;
 }
 
 .nearby-alt {

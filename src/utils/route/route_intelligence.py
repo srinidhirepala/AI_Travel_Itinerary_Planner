@@ -154,8 +154,19 @@ def haversine_distance(coord1: Tuple[float, float], coord2: Tuple[float, float])
 
 
 def get_city_coords(city_name: str) -> Tuple[float, float] | None:
-    """Return coordinates for a city if known."""
-    return CITY_COORDINATES.get(_normalize_city_name(city_name))
+    """Return coordinates for a city.
+    Strategy: hardcoded dict → DB cache → Nominatim API.
+    """
+    normalized = _normalize_city_name(city_name)
+    # 1. Hardcoded (instant)
+    if normalized in CITY_COORDINATES:
+        return CITY_COORDINATES[normalized]
+    # 2. DB cache + API fallback
+    try:
+        from src.utils.route.geocoding import get_city_coords_with_fallback
+        return get_city_coords_with_fallback(city_name)
+    except Exception:
+        return None
 
 
 def estimate_travel_time_hours(distance_km: float) -> float:

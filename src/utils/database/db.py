@@ -4,14 +4,13 @@ Handles users, profile interests, liked places, and saved itineraries.
 """
 import sqlite3
 import json
-import os
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
-DB_PATH = Path(__file__).parent.parent / "data" / "travel.db"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DB_PATH = PROJECT_ROOT / "data" / "travel.db"
 
 
 def _conn() -> sqlite3.Connection:
@@ -63,6 +62,13 @@ def init_db():
             interests   TEXT,               -- JSON list
             data        TEXT NOT NULL,      -- full JSON blob from LLM
             created_at  TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS city_coordinates (
+            city_name   TEXT PRIMARY KEY,
+            latitude    REAL NOT NULL,
+            longitude   REAL NOT NULL,
+            cached_at   TEXT DEFAULT (datetime('now'))
         );
         """)
 
@@ -185,3 +191,22 @@ def get_itinerary_data(itin_id: int) -> Optional[Dict[str, Any]]:
 def delete_itinerary(itin_id: int):
     with _conn() as conn:
         conn.execute("DELETE FROM itineraries WHERE id=?", (itin_id,))
+
+
+# ── City coordinate cache ─────────────────────────────────────────────────────
+
+def get_cached_coordinates(city_name: str):
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT latitude, longitude FROM city_coordinates WHERE city_name=?",
+            (city_name,)
+        ).fetchone()
+        return (row["latitude"], row["longitude"]) if row else None
+
+
+def cache_coordinates(city_name: str, latitude: float, longitude: float):
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO city_coordinates (city_name, latitude, longitude) VALUES (?, ?, ?)",
+            (city_name, latitude, longitude)
+        )

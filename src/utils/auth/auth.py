@@ -14,11 +14,20 @@ import json
 import secrets
 import requests
 import streamlit as st
+from pathlib import Path
 from urllib.parse import urlencode
 from dotenv import load_dotenv
-from utils.db import upsert_user, init_db
+from src.utils.database.db import upsert_user, init_db
 
-load_dotenv()
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_ENV_CANDIDATES = [
+    _PROJECT_ROOT / "config" / ".env",
+    _PROJECT_ROOT / ".env",
+]
+for _env_path in _ENV_CANDIDATES:
+    if _env_path.exists():
+        load_dotenv(dotenv_path=_env_path, override=False)
+        break
 
 # ── Google OAuth endpoints ────────────────────────────────────────────────────
 GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -27,15 +36,31 @@ GOOGLE_USERINFO  = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
 def _load_credentials():
-    path = os.getenv("GOOGLE_CREDENTIALS_PATH", "google_credentials.json")
-    try:
-        with open(path) as f:
-            creds = json.load(f)
-        web = creds.get("web", creds)
-        return web["client_id"], web["client_secret"]
-    except Exception as e:
-        st.error(f"Could not load {path}: {e}")
-        return None, None
+    configured_path = os.getenv("GOOGLE_CREDENTIALS_PATH")
+    candidates = []
+    if configured_path:
+        candidates.append(Path(configured_path))
+    candidates.extend([
+        _PROJECT_ROOT / "config" / "google_credentials.json",
+        _PROJECT_ROOT / "google_credentials.json",
+    ])
+
+    for path in candidates:
+        try:
+            if path.exists():
+                with open(path, encoding="utf-8") as f:
+                    creds = json.load(f)
+                web = creds.get("web", creds)
+                return web["client_id"], web["client_secret"]
+        except Exception as e:
+            st.error(f"Could not load {path}: {e}")
+            return None, None
+
+    st.error(
+        "Could not find Google credentials file. Checked: "
+        + ", ".join(str(p) for p in candidates)
+    )
+    return None, None
 
 
 def _redirect_uri():
@@ -88,7 +113,9 @@ def render_login() -> bool:
     Call at the top of every page.
     Returns True if authenticated, False otherwise.
     """
-    init_db()
+    if "_db_initialized" not in st.session_state:
+        init_db()
+        st.session_state["_db_initialized"] = True
 
     # 1. Already logged in
     if st.session_state.get("user"):
