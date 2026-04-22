@@ -264,6 +264,54 @@ def _render_demo_trip_cards(title: str, subtitle: str, demos: list[dict], button
                 st.rerun()
 
 
+def _render_showcase_demo_trip_cards(
+    title: str,
+    subtitle: str,
+    demos: list[dict],
+    button_key_prefix: str,
+) -> None:
+    """Render richer demo starters for presentations and quick walkthroughs."""
+    st.markdown(f"#### {title}")
+    st.caption(subtitle)
+    demo_cols = st.columns(len(demos), gap="medium")
+    for col, demo in zip(demo_cols, demos):
+        is_trip_demo = demo["page_label"] == "Plan a Trip"
+        route_text = (
+            f"{demo['start_city']} -> " + " -> ".join(demo.get("stops", []))
+            if is_trip_demo
+            else f"From {demo['home_city']}"
+        )
+        stop_count = len(demo.get("stops", []))
+        stop_label = f"{stop_count} stops" if is_trip_demo else "Quick getaway"
+        mode_label = "Multi-city route" if is_trip_demo else "Weekend escape"
+        with col:
+            st.markdown(
+                f"""
+                <div class="feature-block demo-card">
+                  <div class="demo-card-top">
+                    <span class="demo-kicker">{mode_label}</span>
+                    <span class="demo-badge">{demo['days']} days</span>
+                  </div>
+                  <div class="ftitle">{html.escape(demo['title'])}</div>
+                  <div class="fdesc">{html.escape(demo['summary'])}</div>
+                  <div class="demo-route">{html.escape(route_text)}</div>
+                  <div class="demo-meta-row">
+                    <span class="demo-meta-pill">Budget INR {demo['budget']:,}/day</span>
+                    <span class="demo-meta-pill">{html.escape(stop_label)}</span>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if st.button(
+                f"Load {demo['title']}",
+                key=f"{button_key_prefix}_{demo['key']}",
+                use_container_width=True,
+            ):
+                _apply_demo_trip(demo)
+                st.rerun()
+
+
 def _estimate_route_distance_km(cities: list[str]) -> float:
     """Estimate route distance from ordered city stops using mapped coordinates."""
     total_distance = 0.0
@@ -310,6 +358,63 @@ def _render_budget_feasibility_gate(
     if not acknowledged:
         st.info("Adjust the budget, shorten the trip, or confirm the checkbox above to continue.")
     return acknowledged
+
+
+def _render_planner_live_summary(
+    is_weekend: bool,
+    start_or_home: str,
+    destination_text: str,
+    days: int,
+    budget: int,
+    food_pref: str,
+    interests: list[str] | None,
+) -> None:
+    """Render a compact live summary panel so the planner feels more guided."""
+    cleaned_stops = [city.strip() for city in destination_text.split(",") if city.strip()]
+    trip_mode = "Weekend Getaway" if is_weekend else "Multi-City Plan"
+    origin_label = "Starting from" if not is_weekend else "Escaping from"
+    route_label = " -> ".join(cleaned_stops[:4]) if cleaned_stops else "Waiting for your destinations"
+    extra_stops = max(0, len(cleaned_stops) - 4)
+    if extra_stops:
+        route_label += f" +{extra_stops} more"
+
+    interest_text = ", ".join((interests or [])[:3]) if interests else "Choose a few interests"
+    st.markdown(
+        f"""
+        <div class="planner-lens">
+          <div class="planner-lens-head">
+            <div>
+              <div class="planner-lens-kicker">{trip_mode}</div>
+              <div class="planner-lens-title">Live trip summary</div>
+            </div>
+            <div class="planner-lens-route">{html.escape(route_label)}</div>
+          </div>
+          <div class="planner-lens-grid">
+            <div class="planner-lens-item">
+              <span class="planner-lens-label">{origin_label}</span>
+              <strong>{html.escape(start_or_home or "Add your origin")}</strong>
+            </div>
+            <div class="planner-lens-item">
+              <span class="planner-lens-label">Duration</span>
+              <strong>{days} day{'s' if days != 1 else ''}</strong>
+            </div>
+            <div class="planner-lens-item">
+              <span class="planner-lens-label">Budget</span>
+              <strong>INR {budget:,}/day</strong>
+            </div>
+            <div class="planner-lens-item">
+              <span class="planner-lens-label">Food</span>
+              <strong>{html.escape(food_pref or "Not set")}</strong>
+            </div>
+            <div class="planner-lens-item planner-lens-wide">
+              <span class="planner-lens-label">Best matched for</span>
+              <strong>{html.escape(interest_text)}</strong>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _apply_planner_route_to_state(cities: list[str]) -> None:
@@ -542,7 +647,7 @@ if page is None:
       <h1>Start with a vibe, leave with a plan worth taking</h1>
       <p>Build bold city breaks, quiet weekend escapes, and smarter itineraries from the header above whenever inspiration hits.</p>
     </div>""", unsafe_allow_html=True)
-    _render_demo_trip_cards(
+    _render_showcase_demo_trip_cards(
         "Showcase Starters",
         "Load a polished sample flow instantly for demos, recordings, or evaluator walkthroughs.",
         LANDING_DEMO_TRIPS,
@@ -569,7 +674,7 @@ if page in ("planner", "weekend"):
           <h3>Quick inputs for a shorter trip</h3>
           <p>Use this lighter form only for nearby weekend ideas.</p>
         </div>""", unsafe_allow_html=True)
-        _render_demo_trip_cards(
+        _render_showcase_demo_trip_cards(
             "Weekend Demo Starters",
             "Use one click to load a short-haul showcase scenario with nearby getaway suggestions.",
             WEEKEND_DEMO_TRIPS,
@@ -582,7 +687,7 @@ if page in ("planner", "weekend"):
           <h1>Shape a trip that feels exciting before it even begins</h1>
           <p>Map the route, tune the budget, match the food, and turn a list of places into a trip that flows naturally.</p>
         </div>""", unsafe_allow_html=True)
-        _render_demo_trip_cards(
+        _render_showcase_demo_trip_cards(
             "Trip Demo Starters",
             "Load a presentation-ready multi-city scenario to show route intelligence, budget checks, and exports quickly.",
             PLANNER_DEMO_TRIPS,
@@ -787,6 +892,27 @@ if page in ("planner", "weekend"):
             )
         else:
             st.info("Enter your home city to unlock nearby weekend picks matched to your interests.")
+
+    summary_destination = destination or ""
+    if not is_weekend and st.session_state.get("selected_route_order"):
+        summary_preview = [
+            c.strip() for c in st.session_state.get("selected_route_order", []) if c and c.strip()
+        ]
+        start_norm_summary = start_city.strip().lower() if start_city else ""
+        if start_norm_summary and summary_preview and summary_preview[0].lower() == start_norm_summary:
+            summary_preview = summary_preview[1:]
+        if summary_preview:
+            summary_destination = ", ".join(summary_preview)
+
+    _render_planner_live_summary(
+        is_weekend=is_weekend,
+        start_or_home=hometown.strip() if is_weekend else start_city.strip(),
+        destination_text=summary_destination,
+        days=days,
+        budget=budget,
+        food_pref=food_pref,
+        interests=interests,
+    )
 
     generate_btn = st.button(
         "Plan Your Trip" if not is_weekend else "Find My Weekend Trip",
