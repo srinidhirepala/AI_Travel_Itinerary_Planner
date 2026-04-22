@@ -36,31 +36,18 @@ GOOGLE_USERINFO  = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
 def _load_credentials():
-    configured_path = os.getenv("GOOGLE_CREDENTIALS_PATH")
-    candidates = []
-    if configured_path:
-        candidates.append(Path(configured_path))
-    candidates.extend([
-        _PROJECT_ROOT / "config" / "google_credentials.json",
-        _PROJECT_ROOT / "google_credentials.json",
-    ])
-
-    for path in candidates:
-        try:
-            if path.exists():
-                with open(path, encoding="utf-8") as f:
-                    creds = json.load(f)
-                web = creds.get("web", creds)
-                return web["client_id"], web["client_secret"]
-        except Exception as e:
-            st.error(f"Could not load {path}: {e}")
-            return None, None
-
-    st.error(
-        "Could not find Google credentials file. Checked: "
-        + ", ".join(str(p) for p in candidates)
-    )
-    return None, None
+    try:
+        if os.getenv("GOOGLE_CREDENTIALS"):
+            creds = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
+        else:
+            with open("config/google_credentials.json") as f:
+                creds = json.load(f)
+        
+        web = creds.get("web", creds)
+        return web["client_id"], web["client_secret"]
+    except Exception as e:
+        st.error(f"Could not load Google credentials: {e}")
+        return None, None
 
 
 def _redirect_uri():
